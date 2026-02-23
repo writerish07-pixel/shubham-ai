@@ -212,8 +212,7 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
         "target_language_code": language,
         "speaker": "neha",
         "model": "bulbul:v3",
-        "output_audio_codec": "wav",
-        "speech_sample_rate": 22050,
+        "output_audio_codec": "mp3",
     }
     r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=20)
     if r.status_code != 200:
