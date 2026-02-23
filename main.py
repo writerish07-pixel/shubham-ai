@@ -236,7 +236,7 @@ async def incoming_call(request: Request):
 
     opening_url = None
     try:
-        opening_audio = await _run(get_opening_audio, call_sid, timeout=8.0)
+        opening_audio = await _run(get_opening_audio, call_sid, timeout=4.0)
         if opening_audio:
             opening_url = _save_audio(opening_audio, "opening", call_sid)
             print(f"[Incoming] Greeting audio ready: {opening_url}")
@@ -283,7 +283,7 @@ async def outbound_call_handler(request: Request):
 
     opening_url = None
     try:
-        opening_audio = await _run(get_opening_audio, call_sid, timeout=8.0)
+        opening_audio = await _run(get_opening_audio, call_sid, timeout=4.0)
         if opening_audio:
             opening_url = _save_audio(opening_audio, "opening", call_sid)
     except Exception as e:

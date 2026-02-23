@@ -214,7 +214,7 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
         "model": "bulbul:v3",
         "output_audio_codec": "mp3",
     }
-    r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=20)
+    r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=10)
     if r.status_code != 200:
         print(f"[Voice] Sarvam TTS HTTP {r.status_code}: {r.text[:300]}")
     r.raise_for_status()
