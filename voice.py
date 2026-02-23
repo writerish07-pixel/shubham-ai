@@ -159,7 +159,7 @@ def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
         try:
             audio = _sarvam_tts(text)
             if audio:
-                print(f"[TTS] Sarvam OK — {len(audio)} bytes WAV")
+                print(f"[TTS] Sarvam OK — {len(audio)} bytes MP3")
                 return audio
         except Exception as e:
             print(f"[Voice] Sarvam TTS failed: {e}")
