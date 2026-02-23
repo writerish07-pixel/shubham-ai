@@ -37,8 +37,12 @@ def transcribe_audio(audio_bytes: bytes, language_hint: str = "hi-IN") -> dict:
 
 
 def _sarvam_stt(audio_bytes: bytes, language: str = "hi-IN") -> dict:
+    if not config.SARVAM_API_KEY:
+        raise ValueError("SARVAM_API_KEY not configured")
+    mime = _detect_audio_mime(audio_bytes)
+    ext  = "wav" if mime == "audio/wav" else "mp3"
     headers = {"api-subscription-key": config.SARVAM_API_KEY}
-    files = {"file": ("audio.wav", io.BytesIO(audio_bytes), "audio/wav")}
+    files = {"file": (f"audio.{ext}", io.BytesIO(audio_bytes), mime)}
     data = {
         "model": "saarika:v2",
         "language_code": language,
@@ -56,10 +60,22 @@ def _sarvam_stt(audio_bytes: bytes, language: str = "hi-IN") -> dict:
     }
 
 
+def _detect_audio_mime(audio_bytes: bytes) -> str:
+    """Detect audio MIME type from magic bytes. Exotel recordings can be WAV or MP3."""
+    if len(audio_bytes) >= 4 and audio_bytes[:4] == b'RIFF':
+        return "audio/wav"
+    if len(audio_bytes) >= 3 and audio_bytes[:3] == b'ID3':
+        return "audio/mpeg"
+    if len(audio_bytes) >= 2 and audio_bytes[:2] in (b'\xff\xfb', b'\xff\xfa', b'\xff\xf3', b'\xff\xf2'):
+        return "audio/mpeg"
+    return "audio/wav"  # safe default
+
+
 def _deepgram_stt(audio_bytes: bytes) -> dict:
+    mime_type = _detect_audio_mime(audio_bytes)
     headers = {
         "Authorization": f"Token {config.DEEPGRAM_API_KEY}",
-        "Content-Type": "audio/wav",
+        "Content-Type": mime_type,
     }
     params = {
         "model": "nova-2",
