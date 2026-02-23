@@ -3,16 +3,36 @@ scraper.py
 Scrapes Hero MotoCorp bike models, prices from the dealership website.
 Runs once on startup and refreshes every 24 hours.
 Also parses uploaded offer files (PDF / Excel / Image).
+
+Heavy dependencies (pdfplumber, Pillow, pytesseract) are optional.
+The server starts fine without them — offer file parsing will show a
+helpful error message if the specific library is missing.
 """
-import os, re, json
+import re, json
 import requests
-import pdfplumber
-import pandas as pd
-from PIL import Image
-import pytesseract
 from bs4 import BeautifulSoup
 from pathlib import Path
 import config
+
+# Optional heavy deps — imported lazily to avoid startup crashes
+try:
+    import pdfplumber as _pdfplumber
+    _HAS_PDFPLUMBER = True
+except ImportError:
+    _HAS_PDFPLUMBER = False
+
+try:
+    from PIL import Image as _PILImage
+    import pytesseract as _pytesseract
+    _HAS_OCR = True
+except ImportError:
+    _HAS_OCR = False
+
+try:
+    import openpyxl as _openpyxl
+    _HAS_OPENPYXL = True
+except ImportError:
+    _HAS_OPENPYXL = False
 
 CACHE_FILE = Path("data/bikes_cache.json")
 CACHE_FILE.parent.mkdir(exist_ok=True)
@@ -116,8 +136,10 @@ def parse_offer_file(filepath: str) -> str:
     try:
         if ext == ".pdf":
             return _parse_pdf(filepath)
-        elif ext in (".xlsx", ".xls", ".csv"):
+        elif ext in (".xlsx", ".xls"):
             return _parse_excel(filepath)
+        elif ext == ".csv":
+            return _parse_csv(filepath)
         elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             return _parse_image(filepath)
         else:
@@ -127,8 +149,10 @@ def parse_offer_file(filepath: str) -> str:
 
 
 def _parse_pdf(path: str) -> str:
+    if not _HAS_PDFPLUMBER:
+        return "PDF parsing not available. Run: pip install pdfplumber"
     text = []
-    with pdfplumber.open(path) as pdf:
+    with _pdfplumber.open(path) as pdf:
         for page in pdf.pages:
             t = page.extract_text()
             if t:
@@ -137,15 +161,35 @@ def _parse_pdf(path: str) -> str:
 
 
 def _parse_excel(path: str) -> str:
-    ext = Path(path).suffix.lower()
-    if ext == ".csv":
-        df = pd.read_csv(path)
-    else:
-        df = pd.read_excel(path)
-    return df.to_string(index=False)
+    if not _HAS_OPENPYXL:
+        return "Excel parsing not available. Run: pip install openpyxl"
+    import io
+    wb = _openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return ""
+    lines = []
+    for row in rows:
+        line = "\t".join(str(v) if v is not None else "" for v in row)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _parse_csv(path: str) -> str:
+    import csv
+    lines = []
+    with open(path, "r", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            lines.append("\t".join(row))
+    return "\n".join(lines)
 
 
 def _parse_image(path: str) -> str:
-    img = Image.open(path)
-    text = pytesseract.image_to_string(img, lang="eng+hin")
+    if not _HAS_OCR:
+        return "Image OCR not available. Run: pip install Pillow pytesseract"
+    img  = _PILImage.open(path)
+    text = _pytesseract.image_to_string(img, lang="eng+hin")
     return text.strip()

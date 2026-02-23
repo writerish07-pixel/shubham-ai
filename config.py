@@ -15,12 +15,6 @@ ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "fG9s0SXJb213f4UxVHyG")
 SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY", "")
 
-GOOGLE_SHEET_ID     = os.getenv("GOOGLE_SHEET_ID", "")
-try:
-    GOOGLE_CREDENTIALS = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON", "{}"))
-except Exception:
-    GOOGLE_CREDENTIALS = {}
-
 BUSINESS_NAME       = os.getenv("BUSINESS_NAME", "Shubham Motors")
 BUSINESS_CITY       = os.getenv("BUSINESS_CITY", "Jaipur")
 WEBSITE_URL         = os.getenv("WEBSITE_URL", "")

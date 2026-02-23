@@ -4,8 +4,9 @@ The AI brain — builds system prompts, manages conversation,
 classifies leads, extracts next actions from conversations.
 Uses GPT-4o with full Hero catalog + active offers injected.
 """
-import json, re
-from datetime import datetime, timedelta
+import json
+import re
+from datetime import datetime
 from openai import OpenAI
 import config
 from scraper import get_bike_catalog, format_catalog_for_ai

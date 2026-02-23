@@ -6,17 +6,17 @@ Run: python main.py
 KEY DESIGN NOTES:
 - Exotel webhooks must respond within ~8-10 seconds or the call drops.
 - All TTS/STT/AI calls are blocking HTTP — run them in a ThreadPoolExecutor.
-- Exotel ExoML uses <Record> (NOT <Gather input="speech"> which is Twilio TwiML)
+- Exotel ExoML uses <Record> (NOT <Gather input="speech"> which is Twilio TwiML).
   <Record> captures customer audio → Exotel POSTs RecordingUrl → we download + STT.
-- Always have a <Say> fallback in case ElevenLabs TTS is slow/unavailable.
+- CRITICAL: Sarvam TTS returns WAV bytes. We detect format and serve correct MIME type.
+  Serving WAV as audio/mpeg causes silent audio and call disconnection.
 """
 
-import os, json, re, io, asyncio
+import os, json, re, io, asyncio, csv
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-import pandas as pd
 import requests as _requests
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -32,15 +32,14 @@ from lead_manager import process_call_result, add_leads_from_import, get_dashboa
 from exotel_client import make_outbound_call
 from scraper import parse_offer_file, scrape_hero_website
 from scheduler import start_scheduler, stop_scheduler
-from voice import synthesize_speech, transcribe_audio
+from voice import synthesize_speech, transcribe_audio, audio_fmt
 
 # ── App setup ──────────────────────────────────────────────────────────────────
-app = FastAPI(title="Shubham Motors AI Agent", version="2.1.0")
+app = FastAPI(title="Shubham Motors AI Agent", version="2.2.0")
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# Thread pool for ALL blocking I/O (ElevenLabs TTS, Deepgram STT, OpenAI GPT)
-# This prevents blocking the FastAPI async event loop
+# Thread pool for ALL blocking I/O (Sarvam TTS/STT, OpenAI GPT, Exotel API)
 _executor = ThreadPoolExecutor(max_workers=12)
 
 
@@ -53,12 +52,14 @@ async def startup():
     print(f"  {config.BUSINESS_NAME}, {config.BUSINESS_CITY}")
     print(f"  Public URL: {config.PUBLIC_URL}")
     print(f"  Exophone: {config.EXOTEL_PHONE_NUMBER}")
+    print(f"  Sarvam TTS: {'READY' if config.SARVAM_API_KEY else 'NOT CONFIGURED'}")
+    print(f"  ElevenLabs: {'READY' if config.ELEVENLABS_API_KEY else 'NOT CONFIGURED'}")
     print(f"{'='*60}\n")
     try:
         scrape_hero_website()
-        print("Hero bike catalog loaded")
+        print("[Startup] Hero bike catalog loaded")
     except Exception as e:
-        print(f"Catalog load failed: {e} (using fallback data)")
+        print(f"[Startup] Catalog load failed: {e} (using fallback data)")
     start_scheduler()
 
 
@@ -90,7 +91,7 @@ def _hangup_xml() -> str:
 
 
 def _xml_safe(text: str) -> str:
-    """Escape XML special characters for use inside <Say> tags."""
+    """Escape XML special characters for <Say> tags."""
     return (text
             .replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -101,12 +102,12 @@ def _xml_safe(text: str) -> str:
 
 def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> str:
     """
-    Return ExoML that optionally plays audio (or says text), then records customer's reply.
+    Return ExoML that optionally plays audio (or says text), then records customer reply.
 
-    IMPORTANT: Uses <Record> — NOT <Gather input="speech">.
-    <Gather input="speech"> is Twilio TwiML and NOT supported by Exotel ExoML.
-    <Record> is the correct Exotel verb: it records audio and POSTs RecordingUrl
-    to the action webhook, which we then download and transcribe ourselves.
+    Uses <Record> — NOT <Gather input="speech">.
+    <Gather input="speech"> is Twilio TwiML and NOT supported by Exotel.
+    <Record> is the correct Exotel verb: records audio and POSTs RecordingUrl
+    to the action webhook, which we download and transcribe.
     """
     content = ""
     if play_url:
@@ -127,6 +128,41 @@ def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> st
 </Response>"""
 
 
+def _save_audio(audio_bytes: bytes, prefix: str, call_sid: str) -> str:
+    """
+    Save audio bytes with the correct file extension based on format.
+    Returns the public URL for Exotel <Play>.
+
+    CRITICAL: Sarvam TTS returns WAV — must be saved as .wav and served as audio/wav.
+    Saving WAV bytes as .mp3 causes Exotel to get corrupt audio → call drops.
+    """
+    ext, _ = audio_fmt(audio_bytes)
+    path = UPLOAD_DIR / f"{prefix}_{call_sid}.{ext}"
+    path.write_bytes(audio_bytes)
+    return f"{config.PUBLIC_URL}/call/audio/{prefix}/{call_sid}"
+
+
+def _cleanup_audio(call_sid: str):
+    """Delete all audio files for a call (both .wav and .mp3 variants)."""
+    for prefix in ["opening", "response"]:
+        for ext in ["mp3", "wav"]:
+            f = UPLOAD_DIR / f"{prefix}_{call_sid}.{ext}"
+            if f.exists():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+
+def _serve_audio(prefix: str, call_sid: str) -> Response:
+    """Find and serve audio file in either WAV or MP3 format."""
+    for ext, mime in [("wav", "audio/wav"), ("mp3", "audio/mpeg")]:
+        path = UPLOAD_DIR / f"{prefix}_{call_sid}.{ext}"
+        if path.exists():
+            return Response(content=path.read_bytes(), media_type=mime)
+    return Response(status_code=404)
+
+
 def _download_recording(url: str) -> bytes:
     """
     Download a <Record> audio file from Exotel.
@@ -139,7 +175,7 @@ def _download_recording(url: str) -> bytes:
             timeout=15
         )
         r.raise_for_status()
-        print(f"[Audio] Downloaded {len(r.content)} bytes from Exotel recording")
+        print(f"[Audio] Downloaded {len(r.content)} bytes from Exotel")
         return r.content
     except Exception as e:
         print(f"[Audio] Download failed: {e}")
@@ -149,8 +185,8 @@ def _download_recording(url: str) -> bytes:
 async def _run(fn, *args, timeout: float = 12.0):
     """
     Run a blocking function in the thread pool with a timeout.
-    Returns None if timeout or exception occurs.
-    Essential for keeping Exotel webhook response time under ~8s.
+    Essential: keeps Exotel webhook response time under ~8s.
+    Returns None on timeout or exception.
     """
     loop = asyncio.get_running_loop()
     try:
@@ -182,12 +218,12 @@ async def _get_params(request: Request) -> dict:
 @app.api_route("/call/incoming", methods=["GET", "POST"])
 async def incoming_call(request: Request):
     """
-    Exotel hits this when someone calls your Exophone number.
-    MUST respond within 8-10 seconds or Exotel disconnects the call.
+    Exotel hits this when someone calls your Exophone.
+    MUST respond within 8-10 seconds or Exotel disconnects.
 
-    Flow: Start session → generate greeting audio (async, 8s timeout) → return ExoML <Record>
+    Flow: Start session → generate greeting TTS audio → return ExoML <Play> + <Record>
     """
-    data = await _get_params(request)
+    data     = await _get_params(request)
     call_sid = data.get("CallSid", "").strip()
     caller   = data.get("From", data.get("CallFrom", "")).strip()
 
@@ -196,21 +232,16 @@ async def incoming_call(request: Request):
     if not call_sid:
         return Response(content=_hangup_xml(), media_type="application/xml")
 
-    # Start session — fast (only JSON file reads/writes)
     start_call_session(call_sid, caller)
 
-    # Generate personalized greeting audio — async with 8s timeout
-    # Falls back to Exotel <Say> (built-in TTS) if ElevenLabs is slow
     opening_url = None
     try:
         opening_audio = await _run(get_opening_audio, call_sid, timeout=8.0)
         if opening_audio:
-            opening_path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
-            opening_path.write_bytes(opening_audio)
-            opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
-            print(f"[Incoming] Custom greeting ready for {call_sid}")
+            opening_url = _save_audio(opening_audio, "opening", call_sid)
+            print(f"[Incoming] Greeting audio ready: {opening_url}")
     except Exception as e:
-        print(f"[Incoming] Greeting gen error for {call_sid}: {e}")
+        print(f"[Incoming] Greeting gen error: {e}")
 
     if opening_url:
         return Response(
@@ -218,7 +249,7 @@ async def incoming_call(request: Request):
             media_type="application/xml"
         )
     else:
-        # Fallback: Exotel's built-in Hindi TTS — zero latency
+        # Fallback: Exotel built-in Hindi TTS — zero latency
         greeting = (
             "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. "
             "Aapka call receive karke bahut khushi hui! "
@@ -234,10 +265,10 @@ async def incoming_call(request: Request):
 @app.api_route("/call/handler", methods=["GET", "POST"])
 async def outbound_call_handler(request: Request):
     """
-    Exotel hits this when our outbound call connects to the customer.
+    Exotel hits this when our outbound call connects.
     Same flow as incoming — greet + record.
     """
-    data = await _get_params(request)
+    data     = await _get_params(request)
     call_sid = data.get("CallSid", "").strip()
     called   = data.get("To", data.get("CallTo", "")).strip()
     lead_id  = data.get("CustomField", "").strip()
@@ -247,19 +278,14 @@ async def outbound_call_handler(request: Request):
     if not call_sid:
         return Response(content=_hangup_xml(), media_type="application/xml")
 
-    # Avoid duplicate sessions (outbound can sometimes trigger twice)
     if call_sid not in active_calls:
         start_call_session(call_sid, called, lead_id=lead_id)
-    else:
-        print(f"[Outbound] Session already exists for {call_sid}, skipping duplicate init")
 
     opening_url = None
     try:
         opening_audio = await _run(get_opening_audio, call_sid, timeout=8.0)
         if opening_audio:
-            opening_path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
-            opening_path.write_bytes(opening_audio)
-            opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
+            opening_url = _save_audio(opening_audio, "opening", call_sid)
     except Exception as e:
         print(f"[Outbound] Greeting gen error: {e}")
 
@@ -283,39 +309,35 @@ async def outbound_call_handler(request: Request):
 @app.post("/call/gather/{call_sid}")
 async def handle_gather(call_sid: str, request: Request):
     """
-    Exotel POSTs here after <Record> captures customer's speech.
+    Exotel POSTs here after <Record> captures customer speech.
 
-    For <Record> responses: form contains RecordingUrl (audio file URL)
-    For <Gather> responses: form contains SpeechResult or Digits
-
-    We download the recording → STT (Deepgram/Sarvam) → GPT-4o → TTS → return ExoML.
-    All heavy operations run async in ThreadPoolExecutor with timeouts.
+    Steps:
+    1. Download recording from Exotel (requires auth)
+    2. Transcribe with Sarvam STT
+    3. Get AI response from GPT-4o
+    4. Generate TTS audio (Sarvam → WAV, or ElevenLabs → MP3)
+    5. Save with correct extension, return ExoML <Play> + <Record>
     """
     data = await _get_params(request)
 
-    # <Record> sends RecordingUrl; <Gather> sends SpeechResult/Digits
     recording_url = data.get("RecordingUrl", "").strip()
     speech_result = data.get("SpeechResult", "").strip()
     digits        = data.get("Digits", "").strip()
 
-    print(f"[Gather] [{call_sid}] RecordingUrl={bool(recording_url)} "
+    print(f"[Gather] [{call_sid}] RecordingUrl={'yes' if recording_url else 'no'} "
           f"SpeechResult='{speech_result[:60]}' Digits='{digits}'")
 
-    # ── Get active session ────────────────────────────────────────────────────
     session = active_calls.get(call_sid)
     if not session:
-        print(f"[Gather] [{call_sid}] No session found — hanging up")
+        print(f"[Gather] [{call_sid}] No session — hanging up")
         return Response(content=_hangup_xml(), media_type="application/xml")
 
     # ── Transcribe customer input ─────────────────────────────────────────────
     customer_input = speech_result or digits
 
     if not customer_input and recording_url:
-        # Download recording from Exotel (requires auth)
         audio_bytes = await _run(_download_recording, recording_url, timeout=12.0)
-
         if audio_bytes:
-            # Transcribe with Sarvam/Deepgram
             stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=10.0)
             if stt_result:
                 customer_input = stt_result.get("text", "").strip()
@@ -324,7 +346,7 @@ async def handle_gather(call_sid: str, request: Request):
                 if customer_input:
                     session["language"] = detected_lang
 
-    # ── Handle silence / empty input ──────────────────────────────────────────
+    # ── Handle silence / no input ─────────────────────────────────────────────
     if not customer_input:
         silence_count = session.get("silence_count", 0) + 1
         session["silence_count"] = silence_count
@@ -340,19 +362,17 @@ async def handle_gather(call_sid: str, request: Request):
             media_type="application/xml"
         )
 
-    # Reset silence counter on successful speech
     session["silence_count"] = 0
     session["turn_count"] = session.get("turn_count", 0) + 1
-
     print(f"[Gather] [{call_sid}] Customer (turn {session['turn_count']}): '{customer_input[:120]}'")
 
-    # ── Get AI response via GPT-4o ────────────────────────────────────────────
-    conv = session["conversation"]
+    # ── Get AI response from GPT-4o ───────────────────────────────────────────
+    conv       = session["conversation"]
     voice_text = None
 
     ai_reply = await _run(conv.chat, customer_input, timeout=15.0)
     if ai_reply:
-        # Strip any JSON analysis blocks from voice output
+        # Strip JSON analysis blocks — those are for internal use only
         voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
 
     if not voice_text:
@@ -360,7 +380,7 @@ async def handle_gather(call_sid: str, request: Request):
 
     print(f"[Gather] [{call_sid}] Priya: {voice_text[:120]}")
 
-    # ── Detect language for TTS routing ──────────────────────────────────────
+    # ── Detect language for TTS ───────────────────────────────────────────────
     devanagari_count = sum(1 for c in customer_input if '\u0900' <= c <= '\u097F')
     if devanagari_count > len(customer_input) * 0.3:
         lang = "hindi"
@@ -368,22 +388,23 @@ async def handle_gather(call_sid: str, request: Request):
         lang = session.get("language", "hinglish")
     session["language"] = lang
 
-    # ── Generate TTS audio ─────────────────────────────────────────────────
+    # ── Generate TTS audio ─────────────────────────────────────────────────────
+    # CRITICAL: audio_fmt() detects WAV vs MP3 — saved with correct extension
     audio_url = None
-    ai_audio = await _run(synthesize_speech, voice_text, lang, timeout=12.0)
+    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=12.0)
     if ai_audio:
-        audio_path = UPLOAD_DIR / f"response_{call_sid}.mp3"
-        audio_path.write_bytes(ai_audio)
-        audio_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}"
+        audio_url = _save_audio(ai_audio, "response", call_sid)
+        ext, _ = audio_fmt(ai_audio)
+        print(f"[Gather] [{call_sid}] TTS audio saved as .{ext} — URL: {audio_url}")
 
-    # Return ExoML with TTS audio or fallback to Exotel Say
+    # ── Return ExoML ──────────────────────────────────────────────────────────
     if audio_url:
         return Response(
             content=_record_xml(call_sid, play_url=audio_url),
             media_type="application/xml"
         )
     else:
-        # Fallback: Exotel's built-in TTS (zero latency, lower quality)
+        # Fallback: Exotel built-in TTS
         print(f"[Gather] [{call_sid}] TTS unavailable — using Say fallback")
         return Response(
             content=_record_xml(call_sid, say_text=voice_text),
@@ -395,57 +416,46 @@ async def handle_gather(call_sid: str, request: Request):
 async def call_status(request: Request, background_tasks: BackgroundTasks):
     """
     Exotel hits this when call ends.
-    Analyse conversation and update lead in background (don't block Exotel).
+    Analyse conversation and update lead in background.
     """
-    data = await _get_params(request)
+    data     = await _get_params(request)
     call_sid = data.get("CallSid", "")
     status   = data.get("Status", "")
     duration = int(data.get("Duration", 0))
 
     print(f"\n[Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
 
-    # Process in background — don't make Exotel wait
     background_tasks.add_task(end_call_session, call_sid, duration)
-
-    # Cleanup audio files
-    for prefix in ["opening", "response", "retry"]:
-        f = UPLOAD_DIR / f"{prefix}_{call_sid}.mp3"
-        if f.exists():
-            try:
-                f.unlink()
-            except Exception:
-                pass
+    _cleanup_audio(call_sid)
 
     return JSONResponse({"received": True})
 
 
 # ── AUDIO FILE SERVING ─────────────────────────────────────────────────────────
+# Exotel <Play> downloads audio from these URLs.
+# We detect format automatically (WAV from Sarvam, MP3 from ElevenLabs).
 
 @app.get("/call/audio/opening/{call_sid}")
 async def serve_opening_audio(call_sid: str):
-    path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
-    if not path.exists():
+    resp = _serve_audio("opening", call_sid)
+    if resp.status_code == 404:
         # Try to regenerate if session still active
         audio = await _run(get_opening_audio, call_sid, timeout=10.0)
         if audio:
-            path.write_bytes(audio)
-        else:
-            return Response(status_code=404)
-    return Response(content=path.read_bytes(), media_type="audio/mpeg")
+            _save_audio(audio, "opening", call_sid)
+            return _serve_audio("opening", call_sid)
+    return resp
 
 
 @app.get("/call/audio/response/{call_sid}")
 async def serve_response_audio(call_sid: str):
-    path = UPLOAD_DIR / f"response_{call_sid}.mp3"
-    if not path.exists():
-        return Response(status_code=404)
-    return Response(content=path.read_bytes(), media_type="audio/mpeg")
+    return _serve_audio("response", call_sid)
 
 
 # ── ADMIN API ──────────────────────────────────────────────────────────────────
 
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
+async def dashboard():
     stats = get_dashboard_stats()
     leads = db.get_all_leads()
     priority = {"hot": 0, "warm": 1, "new": 2, "active": 3, "cold": 4, "dead": 5, "converted": 6}
@@ -460,29 +470,81 @@ async def api_leads():
 
 @app.post("/api/leads/add")
 async def api_add_lead(request: Request):
-    data = await request.json()
+    data    = await request.json()
     lead_id = db.add_lead(data)
     return JSONResponse({"success": True, "lead_id": lead_id})
 
 
 @app.post("/api/leads/import")
 async def import_leads(file: UploadFile = File(...)):
+    """Import leads from CSV or Excel file — no pandas required."""
     content = await file.read()
-    ext = Path(file.filename).suffix.lower()
+    ext     = Path(file.filename).suffix.lower()
+
     try:
-        df = pd.read_csv(io.BytesIO(content)) if ext == ".csv" else pd.read_excel(io.BytesIO(content))
-        df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
+        if ext == ".csv":
+            leads = _parse_csv_leads(content)
+        elif ext in (".xlsx", ".xls"):
+            leads = _parse_excel_leads(content)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+
+        # Normalize column names
         col_map = {
             "phone": "mobile", "contact": "mobile", "number": "mobile",
             "customer_name": "name", "customer": "name",
             "model": "interested_model", "bike": "interested_model",
         }
-        df.rename(columns=col_map, inplace=True)
-        leads = df.to_dict(orient="records")
-        ids = add_leads_from_import(leads)
-        return JSONResponse({"success": True, "imported": len(ids), "skipped": len(leads) - len(ids)})
+        normalized = []
+        for row in leads:
+            normalized_row = {col_map.get(k, k): v for k, v in row.items() if v}
+            normalized.append(normalized_row)
+
+        ids = add_leads_from_import(normalized)
+        return JSONResponse({
+            "success": True,
+            "imported": len(ids),
+            "skipped": len(normalized) - len(ids)
+        })
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+def _parse_csv_leads(content: bytes) -> list:
+    """Parse CSV file into list of dicts using built-in csv module."""
+    text   = content.decode("utf-8-sig")  # Handle BOM
+    reader = csv.DictReader(io.StringIO(text))
+    rows   = []
+    for row in reader:
+        clean = {k.lower().strip().replace(" ", "_"): str(v).strip() for k, v in row.items() if v}
+        rows.append(clean)
+    return rows
+
+
+def _parse_excel_leads(content: bytes) -> list:
+    """Parse Excel file into list of dicts using openpyxl."""
+    import openpyxl
+    wb   = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws   = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+    headers = [
+        str(h).lower().strip().replace(" ", "_") if h is not None else f"col_{i}"
+        for i, h in enumerate(rows[0])
+    ]
+    result = []
+    for row in rows[1:]:
+        record = {}
+        for i, val in enumerate(row):
+            if val is not None and str(val).strip():
+                record[headers[i]] = str(val).strip()
+        if record:
+            result.append(record)
+    wb.close()
+    return result
 
 
 @app.post("/api/call/make")
@@ -542,7 +604,7 @@ def _render_dashboard(stats: dict, leads: list) -> str:
     }
     rows = ""
     for l in leads:
-        s = l.get("status", "new")
+        s  = l.get("status", "new")
         ic = badge.get(s, "⚪")
         rows += f"""
         <tr>
@@ -785,10 +847,6 @@ async function uploadOffer() {{
   document.getElementById('offerResult').textContent =
     res.success ? 'Offer uploaded! AI will use this in all calls.' : 'Upload failed';
 }}
-
-setInterval(async () => {{
-  try {{ await fetch('/api/stats'); }} catch(e) {{}}
-}}, 30000);
 </script>
 </body>
 </html>"""
