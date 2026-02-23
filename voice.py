@@ -79,7 +79,7 @@ def _sarvam_stt(audio_bytes: bytes, language: str = "hi-IN") -> dict:
     data = {
         "model": "saarika:v2",
         "language_code": language,
-        "with_timestamps": "false",
+        "with_timestamps": False,
     }
     r = requests.post(SARVAM_STT_URL, headers=headers, files=files, data=data, timeout=15)
     if r.status_code != 200:
@@ -212,10 +212,8 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
         "target_language_code": language,
         "speaker": "anushka",
         "model": "bulbul:v3",
-        "pitch": 0,
-        "pace": 1.1,
-        "loudness": 1.2,
-        "enable_preprocessing": True,
+        "output_audio_codec": "wav",
+        "speech_sample_rate": 22050,
     }
     r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=20)
     if r.status_code != 200:
