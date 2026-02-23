@@ -113,32 +113,29 @@ def _normalize_lang(code: str) -> str:
 def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
     """
     Convert text to audio bytes (WAV/MP3).
-    Uses ElevenLabs for English/Hinglish, Sarvam for pure Hindi.
+    Uses Sarvam as primary TTS (better for Hindi/Hinglish), ElevenLabs as fallback.
     """
     # Clean text — remove markdown, JSON blocks
     import re
     text = re.sub(r'\{[^}]+\}', '', text, flags=re.DOTALL)
     text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
     text = text.strip()
-    
+
     if not text:
         return b""
-    
-    if language == "hindi" and config.SARVAM_API_KEY:
+
+    # Sarvam first — works for Hindi, Hinglish, and English
+    if config.SARVAM_API_KEY:
         try:
             return _sarvam_tts(text, "hi-IN")
         except Exception as e:
             print(f"[Voice] Sarvam TTS failed: {e}, trying ElevenLabs")
 
+    # ElevenLabs fallback
     try:
         return _elevenlabs_tts(text)
     except Exception as e:
-        print(f"[Voice] ElevenLabs TTS failed: {e}, trying Sarvam fallback")
-        if config.SARVAM_API_KEY:
-            try:
-                return _sarvam_tts(text, "hi-IN")
-            except Exception as e2:
-                print(f"[Voice] Sarvam fallback TTS also failed: {e2}")
+        print(f"[Voice] ElevenLabs TTS failed: {e}")
         return b""
 
 
