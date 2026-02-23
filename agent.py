@@ -124,7 +124,7 @@ class ConversationManager:
             model="gpt-4o",
             messages=[{"role": "system", "content": self.system_prompt}] + self.history,
             temperature=0.8,
-            max_tokens=300,
+            max_tokens=120,
         )
         
         ai_reply = response.choices[0].message.content

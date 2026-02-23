@@ -39,23 +39,25 @@ def transcribe_audio(audio_bytes: bytes, language_hint: str = "hi-IN") -> dict:
     """
     Convert audio bytes to text.
     Returns {"text": "...", "language": "hindi/english/hinglish", "confidence": 0.9}
-    Tries Sarvam first (better for Hindi/Hinglish), falls back to Deepgram.
+    Tries Deepgram first (fastest, ~1s), falls back to Sarvam.
     """
-    # Try Sarvam AI first
+    # Try Deepgram first — much faster (0.5-2s vs Sarvam's 3-5s)
+    if config.DEEPGRAM_API_KEY and not config.DEEPGRAM_API_KEY.startswith("YOUR_"):
+        try:
+            result = _deepgram_stt(audio_bytes)
+            if result.get("text"):
+                return result
+        except Exception as e:
+            print(f"[Voice] Deepgram STT failed: {e}, trying Sarvam")
+
+    # Fallback to Sarvam
     if config.SARVAM_API_KEY and not config.SARVAM_API_KEY.startswith("YOUR_"):
         try:
             result = _sarvam_stt(audio_bytes, language_hint)
             if result.get("text"):
                 return result
         except Exception as e:
-            print(f"[Voice] Sarvam STT failed: {e}, trying Deepgram")
-
-    # Fallback to Deepgram
-    if config.DEEPGRAM_API_KEY and not config.DEEPGRAM_API_KEY.startswith("YOUR_"):
-        try:
-            return _deepgram_stt(audio_bytes)
-        except Exception as e:
-            print(f"[Voice] Deepgram STT failed: {e}")
+            print(f"[Voice] Sarvam STT failed: {e}")
 
     return {"text": "", "language": "hinglish", "confidence": 0.0}
 
@@ -211,10 +213,10 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
         "inputs": [text],
         "target_language_code": language,
         "speaker": "neha",
-        "model": "bulbul:v3",
+        "model": "bulbul:v2",
         "output_audio_codec": "mp3",
     }
-    r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=10)
+    r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=6)
     if r.status_code != 200:
         print(f"[Voice] Sarvam TTS HTTP {r.status_code}: {r.text[:300]}")
     r.raise_for_status()

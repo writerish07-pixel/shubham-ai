@@ -25,9 +25,10 @@ import uvicorn
 import config
 import sheets_manager as db
 from call_handler import (
-    start_call_session, get_opening_audio,
+    start_call_session,
     end_call_session, active_calls
 )
+from agent import get_opening_message
 from lead_manager import process_call_result, add_leads_from_import, get_dashboard_stats
 from exotel_client import make_outbound_call
 from scraper import parse_offer_file, scrape_hero_website
@@ -234,32 +235,19 @@ async def incoming_call(request: Request):
 
     start_call_session(call_sid, caller)
 
-    opening_url = None
-    try:
-        opening_audio = await _run(get_opening_audio, call_sid, timeout=4.0)
-        if opening_audio:
-            opening_url = _save_audio(opening_audio, "opening", call_sid)
-            print(f"[Incoming] Greeting audio ready: {opening_url}")
-    except Exception as e:
-        print(f"[Incoming] Greeting gen error: {e}")
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=True)
 
-    if opening_url:
-        return Response(
-            content=_record_xml(call_sid, play_url=opening_url),
-            media_type="application/xml"
-        )
-    else:
-        # Fallback: Exotel built-in Hindi TTS — zero latency
-        greeting = (
-            "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. "
-            "Aapka call receive karke bahut khushi hui! "
-            "Kaise help kar sakti hoon aapki? Koi Hero bike mein interest hai aapko?"
-        )
-        print(f"[Incoming] Using Say fallback for {call_sid}")
-        return Response(
-            content=_record_xml(call_sid, say_text=greeting),
-            media_type="application/xml"
-        )
+    # Log opening in conversation history so AI has context for first reply
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    print(f"[Incoming] Greeting → Say: {greeting[:80]}")
+    return Response(
+        content=_record_xml(call_sid, say_text=greeting),
+        media_type="application/xml"
+    )
 
 
 @app.api_route("/call/handler", methods=["GET", "POST"])
@@ -281,29 +269,19 @@ async def outbound_call_handler(request: Request):
     if call_sid not in active_calls:
         start_call_session(call_sid, called, lead_id=lead_id)
 
-    opening_url = None
-    try:
-        opening_audio = await _run(get_opening_audio, call_sid, timeout=4.0)
-        if opening_audio:
-            opening_url = _save_audio(opening_audio, "opening", call_sid)
-    except Exception as e:
-        print(f"[Outbound] Greeting gen error: {e}")
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=False)
 
-    if opening_url:
-        return Response(
-            content=_record_xml(call_sid, play_url=opening_url),
-            media_type="application/xml"
-        )
-    else:
-        greeting = (
-            "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. "
-            "Aapki Hero bike enquiry ke baare mein baat karna tha — "
-            "kya aap abhi thodi der baat kar sakte hain?"
-        )
-        return Response(
-            content=_record_xml(call_sid, say_text=greeting),
-            media_type="application/xml"
-        )
+    # Log opening in conversation history so AI has context for first reply
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    print(f"[Outbound] Greeting → Say: {greeting[:80]}")
+    return Response(
+        content=_record_xml(call_sid, say_text=greeting),
+        media_type="application/xml"
+    )
 
 
 @app.post("/call/gather/{call_sid}")
@@ -336,9 +314,9 @@ async def handle_gather(call_sid: str, request: Request):
     customer_input = speech_result or digits
 
     if not customer_input and recording_url:
-        audio_bytes = await _run(_download_recording, recording_url, timeout=12.0)
+        audio_bytes = await _run(_download_recording, recording_url, timeout=6.0)
         if audio_bytes:
-            stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=10.0)
+            stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=5.0)
             if stt_result:
                 customer_input = stt_result.get("text", "").strip()
                 detected_lang  = stt_result.get("language", "hinglish")
@@ -370,7 +348,7 @@ async def handle_gather(call_sid: str, request: Request):
     conv       = session["conversation"]
     voice_text = None
 
-    ai_reply = await _run(conv.chat, customer_input, timeout=15.0)
+    ai_reply = await _run(conv.chat, customer_input, timeout=8.0)
     if ai_reply:
         # Strip JSON analysis blocks — those are for internal use only
         voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
@@ -391,7 +369,7 @@ async def handle_gather(call_sid: str, request: Request):
     # ── Generate TTS audio ─────────────────────────────────────────────────────
     # CRITICAL: audio_fmt() detects WAV vs MP3 — saved with correct extension
     audio_url = None
-    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=12.0)
+    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=5.0)
     if ai_audio:
         audio_url = _save_audio(ai_audio, "response", call_sid)
         ext, _ = audio_fmt(ai_audio)
