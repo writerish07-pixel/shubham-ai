@@ -125,16 +125,17 @@ def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
         return b""
 
     # Sarvam first — works for Hindi, Hinglish, and English
-    if config.SARVAM_API_KEY:
-        print(f"[TTS] Using Sarvam (key set: {config.SARVAM_API_KEY[:8]}...)")
+    sarvam_ready = config.SARVAM_API_KEY and not config.SARVAM_API_KEY.startswith("YOUR_")
+    if sarvam_ready:
+        print(f"[TTS] Using Sarvam (key: {config.SARVAM_API_KEY[:8]}...)")
         try:
             return _sarvam_tts(text, "hi-IN")
         except Exception as e:
             print(f"[Voice] Sarvam TTS failed: {e}, trying ElevenLabs")
 
     # ElevenLabs fallback
-    if not config.SARVAM_API_KEY:
-        print("[TTS] WARNING: SARVAM_API_KEY not set — using ElevenLabs (may fail if quota exceeded)")
+    if not sarvam_ready:
+        print("[TTS] WARNING: SARVAM_API_KEY not set/invalid — using ElevenLabs (may fail if quota exceeded)")
     try:
         return _elevenlabs_tts(text)
     except Exception as e:
