@@ -210,7 +210,7 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
     payload = {
         "inputs": [text],
         "target_language_code": language,
-        "speaker": "anushka",
+        "speaker": "neha",
         "model": "bulbul:v3",
         "output_audio_codec": "wav",
         "speech_sample_rate": 22050,
