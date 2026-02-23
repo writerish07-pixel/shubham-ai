@@ -168,6 +168,17 @@ async def _run(fn, *args, timeout: float = 12.0):
 
 # ── EXOTEL WEBHOOKS ────────────────────────────────────────────────────────────
 
+async def _get_params(request: Request) -> dict:
+    """Merge GET query params + POST form body. Exotel may use either."""
+    data = dict(request.query_params)
+    try:
+        form = await request.form()
+        data.update({k: v for k, v in form.items()})
+    except Exception:
+        pass
+    return data
+
+
 @app.api_route("/call/incoming", methods=["GET", "POST"])
 async def incoming_call(request: Request):
     """
@@ -176,9 +187,9 @@ async def incoming_call(request: Request):
 
     Flow: Start session → generate greeting audio (async, 8s timeout) → return ExoML <Record>
     """
-    form = await request.form()
-    call_sid = form.get("CallSid", "").strip()
-    caller   = form.get("From", "").strip()
+    data = await _get_params(request)
+    call_sid = data.get("CallSid", "").strip()
+    caller   = data.get("From", data.get("CallFrom", "")).strip()
 
     print(f"\n[Incoming] Call from {caller} | SID: {call_sid}")
 
@@ -226,10 +237,10 @@ async def outbound_call_handler(request: Request):
     Exotel hits this when our outbound call connects to the customer.
     Same flow as incoming — greet + record.
     """
-    form = await request.form()
-    call_sid = form.get("CallSid", "").strip()
-    called   = form.get("To", "").strip()
-    lead_id  = form.get("CustomField", "").strip()
+    data = await _get_params(request)
+    call_sid = data.get("CallSid", "").strip()
+    called   = data.get("To", data.get("CallTo", "")).strip()
+    lead_id  = data.get("CustomField", "").strip()
 
     print(f"\n[Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
 
@@ -280,12 +291,12 @@ async def handle_gather(call_sid: str, request: Request):
     We download the recording → STT (Deepgram/Sarvam) → GPT-4o → TTS → return ExoML.
     All heavy operations run async in ThreadPoolExecutor with timeouts.
     """
-    form = await request.form()
+    data = await _get_params(request)
 
     # <Record> sends RecordingUrl; <Gather> sends SpeechResult/Digits
-    recording_url = form.get("RecordingUrl", "").strip()
-    speech_result = form.get("SpeechResult", "").strip()
-    digits        = form.get("Digits", "").strip()
+    recording_url = data.get("RecordingUrl", "").strip()
+    speech_result = data.get("SpeechResult", "").strip()
+    digits        = data.get("Digits", "").strip()
 
     print(f"[Gather] [{call_sid}] RecordingUrl={bool(recording_url)} "
           f"SpeechResult='{speech_result[:60]}' Digits='{digits}'")
@@ -380,16 +391,16 @@ async def handle_gather(call_sid: str, request: Request):
         )
 
 
-@app.post("/call/status")
+@app.api_route("/call/status", methods=["GET", "POST"])
 async def call_status(request: Request, background_tasks: BackgroundTasks):
     """
     Exotel hits this when call ends.
     Analyse conversation and update lead in background (don't block Exotel).
     """
-    form = await request.form()
-    call_sid = form.get("CallSid", "")
-    status   = form.get("Status", "")
-    duration = int(form.get("Duration", 0))
+    data = await _get_params(request)
+    call_sid = data.get("CallSid", "")
+    status   = data.get("Status", "")
+    duration = int(data.get("Duration", 0))
 
     print(f"\n[Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
 
