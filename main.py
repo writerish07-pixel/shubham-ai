@@ -33,6 +33,7 @@ from lead_manager import process_call_result, add_leads_from_import, get_dashboa
 from exotel_client import make_outbound_call as _exotel_make_call
 import airtel_iq_client as _airtel_iq
 import plivo_client as _plivo
+import ozonetel_client as _ozonetel
 from scraper import parse_offer_file, scrape_hero_website
 from scheduler import start_scheduler, stop_scheduler
 from voice import synthesize_speech, transcribe_audio, audio_fmt
@@ -538,6 +539,8 @@ def _make_outbound_call(to_number: str, lead_id: str = "") -> dict:
     """Route call through configured telephony provider."""
     if config.TELEPHONY_PROVIDER == "plivo":
         return _plivo.make_outbound_call(to_number, lead_id)
+    if config.TELEPHONY_PROVIDER == "ozonetel":
+        return _ozonetel.make_outbound_call(to_number, lead_id)
     if config.TELEPHONY_PROVIDER == "airtel_iq":
         return _airtel_iq.make_outbound_call(to_number, lead_id)
     return _exotel_make_call(to_number, lead_id)
@@ -866,6 +869,153 @@ async def plivo_status(request: Request, background_tasks: BackgroundTasks):
     duration = int(data.get("Duration") or data.get("BillDuration") or 0)
 
     print(f"\n[Plivo Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
+
+    background_tasks.add_task(end_call_session, call_sid, duration)
+    _cleanup_audio(call_sid)
+    return JSONResponse({"received": True})
+
+
+# ── OZONETEL / KOOKOO WEBHOOKS ────────────────────────────────────────────────
+# Set TELEPHONY_PROVIDER=ozonetel in .env to use KooKoo.
+# NOTE: KooKoo uses its own XML format (<response><say>/<play>/<record>/<hangup>)
+# which is DIFFERENT from ExoML/TwiML. Separate webhook handlers are needed.
+#
+# Set inbound call URL in KooKoo dashboard → your number → {PUBLIC_URL}/ozonetel/incoming
+# Outbound calls send answer via xml_url param which points to /ozonetel/handler
+
+@app.api_route("/ozonetel/incoming", methods=["GET", "POST"])
+async def ozonetel_incoming(request: Request):
+    """KooKoo calls this when a customer calls your virtual number (inbound)."""
+    data     = await _get_params(request)
+    # KooKoo sends: Called (your number), CalledFrom (customer), CallSid
+    call_sid = data.get("CallSid", data.get("call_sid", "")).strip()
+    caller   = data.get("CalledFrom", data.get("From", "")).strip()
+
+    print(f"\n[Ozonetel Incoming] Call from {caller} | SID: {call_sid}")
+
+    if not call_sid:
+        return Response(content=_ozonetel.kookoo_hangup_xml(), media_type="application/xml")
+
+    start_call_session(call_sid, caller)
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=True)
+
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    return Response(
+        content=_ozonetel.kookoo_record_xml(call_sid, say_text=greeting),
+        media_type="application/xml"
+    )
+
+
+@app.api_route("/ozonetel/handler", methods=["GET", "POST"])
+async def ozonetel_outbound_handler(request: Request):
+    """KooKoo calls this (xml_url) when our outbound call connects."""
+    data     = await _get_params(request)
+    call_sid = data.get("CallSid", data.get("call_sid", "")).strip()
+    called   = data.get("Called", data.get("To", "")).strip()
+    lead_id  = data.get("lead_id", "").strip()  # from query param in xml_url
+
+    print(f"\n[Ozonetel Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
+
+    if not call_sid:
+        return Response(content=_ozonetel.kookoo_hangup_xml(), media_type="application/xml")
+
+    if call_sid not in active_calls:
+        start_call_session(call_sid, called, lead_id=lead_id)
+
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=False)
+
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    return Response(
+        content=_ozonetel.kookoo_record_xml(call_sid, say_text=greeting),
+        media_type="application/xml"
+    )
+
+
+@app.post("/ozonetel/gather/{call_sid}")
+async def ozonetel_gather(call_sid: str, request: Request):
+    """
+    KooKoo posts here when <record> finishes capturing customer speech.
+    Recording URL param from KooKoo: RecordingUrl or recordingUrl.
+    """
+    data = await _get_params(request)
+    recording_url = (data.get("RecordingUrl") or data.get("recordingUrl") or "").strip()
+    digits        = data.get("Digits", "").strip()
+
+    print(f"[Ozonetel Gather] [{call_sid}] Recording={'yes' if recording_url else 'no'}")
+
+    session = active_calls.get(call_sid)
+    if not session:
+        return Response(content=_ozonetel.kookoo_hangup_xml(), media_type="application/xml")
+
+    customer_input = digits
+    if not customer_input and recording_url:
+        audio_bytes = await _run(_download_recording, recording_url, timeout=6.0)
+        if audio_bytes:
+            stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=5.0)
+            if stt_result:
+                customer_input = stt_result.get("text", "").strip()
+                if customer_input:
+                    session["language"] = stt_result.get("language", "hinglish")
+
+    if not customer_input:
+        silence_count = session.get("silence_count", 0) + 1
+        session["silence_count"] = silence_count
+        if silence_count >= 3:
+            return Response(content=_ozonetel.kookoo_hangup_xml(), media_type="application/xml")
+        retry_text = "Ji? Kuch clearly suna nahi — thoda louder bol sakte hain?"
+        return Response(
+            content=_ozonetel.kookoo_record_xml(call_sid, say_text=retry_text),
+            media_type="application/xml"
+        )
+
+    session["silence_count"] = 0
+    session["turn_count"] = session.get("turn_count", 0) + 1
+
+    conv       = session["conversation"]
+    ai_reply   = await _run(conv.chat, customer_input, timeout=5.0)
+    voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply or "").strip()
+    if not voice_text:
+        voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+
+    print(f"[Ozonetel Gather] [{call_sid}] Priya: {voice_text[:120]}")
+
+    devanagari_count = sum(1 for c in customer_input if '\u0900' <= c <= '\u097F')
+    lang = "hindi" if devanagari_count > len(customer_input) * 0.3 else session.get("language", "hinglish")
+    session["language"] = lang
+
+    audio_url = None
+    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=9.0)
+    if ai_audio:
+        audio_url = _save_audio(ai_audio, "response", call_sid)
+
+    if audio_url:
+        return Response(
+            content=_ozonetel.kookoo_record_xml(call_sid, play_url=audio_url),
+            media_type="application/xml"
+        )
+    return Response(
+        content=_ozonetel.kookoo_record_xml(call_sid, say_text=voice_text),
+        media_type="application/xml"
+    )
+
+
+@app.api_route("/ozonetel/status", methods=["GET", "POST"])
+async def ozonetel_status(request: Request, background_tasks: BackgroundTasks):
+    """KooKoo call-ended callback (set in outbound call payload as status_url)."""
+    data     = await _get_params(request)
+    call_sid = data.get("CallSid", data.get("call_sid", ""))
+    status   = data.get("DialCallStatus", data.get("Status", ""))
+    duration = int(data.get("DialCallDuration") or data.get("Duration") or 0)
+
+    print(f"\n[Ozonetel Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
 
     background_tasks.add_task(end_call_session, call_sid, duration)
     _cleanup_audio(call_sid)

@@ -24,7 +24,12 @@ PLIVO_AUTH_ID      = os.getenv("PLIVO_AUTH_ID", "")
 PLIVO_AUTH_TOKEN   = os.getenv("PLIVO_AUTH_TOKEN", "")
 PLIVO_PHONE_NUMBER = os.getenv("PLIVO_PHONE_NUMBER", "")
 
-# TELEPHONY_PROVIDER: "exotel", "plivo", or "airtel_iq"
+# Ozonetel KooKoo — Indian company, Indian DIDs, self-service, good developer API.
+# Sign up: https://kookoo.in | Docs: https://kookoo.in/devcenter
+OZONETEL_API_KEY      = os.getenv("OZONETEL_API_KEY", "")
+OZONETEL_PHONE_NUMBER = os.getenv("OZONETEL_PHONE_NUMBER", "")
+
+# TELEPHONY_PROVIDER: "exotel" | "plivo" | "ozonetel" | "airtel_iq"
 TELEPHONY_PROVIDER = os.getenv("TELEPHONY_PROVIDER", "exotel")
 
 # Groq — 10x faster than OpenAI, 10x cheaper. Best for real-time voice AI.
