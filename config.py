@@ -17,7 +17,14 @@ AIRTEL_IQ_ACCOUNT_ID   = os.getenv("AIRTEL_IQ_ACCOUNT_ID", "")
 AIRTEL_IQ_PHONE_NUMBER = os.getenv("AIRTEL_IQ_PHONE_NUMBER", "")
 AIRTEL_IQ_SUBDOMAIN    = os.getenv("AIRTEL_IQ_SUBDOMAIN", "api.airtel.in")
 
-# TELEPHONY_PROVIDER: "exotel" or "airtel_iq"
+# Plivo — Recommended Exotel alternative. Indian DIDs, self-service signup.
+# Sign up + buy number: https://console.plivo.com (free trial credit)
+# Auth ID + Token from: console.plivo.com → Dashboard (top right)
+PLIVO_AUTH_ID      = os.getenv("PLIVO_AUTH_ID", "")
+PLIVO_AUTH_TOKEN   = os.getenv("PLIVO_AUTH_TOKEN", "")
+PLIVO_PHONE_NUMBER = os.getenv("PLIVO_PHONE_NUMBER", "")
+
+# TELEPHONY_PROVIDER: "exotel", "plivo", or "airtel_iq"
 TELEPHONY_PROVIDER = os.getenv("TELEPHONY_PROVIDER", "exotel")
 
 # Groq — 10x faster than OpenAI, 10x cheaper. Best for real-time voice AI.

@@ -6,7 +6,19 @@ from datetime import datetime, timedelta
 import itertools
 import config
 import sheets_manager as db
-from exotel_client import notify_salesperson
+import config as _cfg
+import exotel_client as _exotel
+import plivo_client as _plivo
+import airtel_iq_client as _airtel_iq
+
+
+def notify_salesperson(salesperson: dict, lead: dict) -> bool:
+    """Route SMS notification through configured telephony provider."""
+    if _cfg.TELEPHONY_PROVIDER == "plivo":
+        return _plivo.notify_salesperson(salesperson, lead)
+    if _cfg.TELEPHONY_PROVIDER == "airtel_iq":
+        return _airtel_iq.notify_salesperson(salesperson, lead)
+    return _exotel.notify_salesperson(salesperson, lead)
 
 # Round-robin assignment tracker
 _assignment_counter = itertools.cycle(range(len(config.SALES_TEAM)))

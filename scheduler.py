@@ -13,11 +13,14 @@ import config
 import sheets_manager as db
 import exotel_client as _exotel
 import airtel_iq_client as _airtel_iq
+import plivo_client as _plivo
 from scraper import scrape_hero_website
 
 
 def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
-    """Route through configured telephony provider."""
+    """Route through configured telephony provider (exotel / plivo / airtel_iq)."""
+    if config.TELEPHONY_PROVIDER == "plivo":
+        return _plivo.make_outbound_call(to_number, lead_id)
     if config.TELEPHONY_PROVIDER == "airtel_iq":
         return _airtel_iq.make_outbound_call(to_number, lead_id)
     return _exotel.make_outbound_call(to_number, lead_id)

@@ -32,6 +32,7 @@ from agent import get_opening_message
 from lead_manager import process_call_result, add_leads_from_import, get_dashboard_stats
 from exotel_client import make_outbound_call as _exotel_make_call
 import airtel_iq_client as _airtel_iq
+import plivo_client as _plivo
 from scraper import parse_offer_file, scrape_hero_website
 from scheduler import start_scheduler, stop_scheduler
 from voice import synthesize_speech, transcribe_audio, audio_fmt
@@ -116,7 +117,8 @@ def _record_xml(call_sid: str, play_url: str = None, say_text: str = None,
     elif say_text:
         content = f'  <Say language="hi-IN" voice="female">{_xml_safe(say_text[:800])}</Say>'
 
-    gather_path = "/airtel/gather/" if provider == "airtel_iq" else "/call/gather/"
+    gather_paths = {"airtel_iq": "/airtel/gather/", "plivo": "/plivo/gather/"}
+    gather_path = gather_paths.get(provider, "/call/gather/")
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -534,6 +536,8 @@ def _parse_excel_leads(content: bytes) -> list:
 
 def _make_outbound_call(to_number: str, lead_id: str = "") -> dict:
     """Route call through configured telephony provider."""
+    if config.TELEPHONY_PROVIDER == "plivo":
+        return _plivo.make_outbound_call(to_number, lead_id)
     if config.TELEPHONY_PROVIDER == "airtel_iq":
         return _airtel_iq.make_outbound_call(to_number, lead_id)
     return _exotel_make_call(to_number, lead_id)
@@ -706,6 +710,162 @@ async def airtel_status(request: Request, background_tasks: BackgroundTasks):
     duration = int(data.get("duration") or data.get("Duration") or 0)
 
     print(f"\n[AirtelIQ Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
+
+    background_tasks.add_task(end_call_session, call_sid, duration)
+    _cleanup_audio(call_sid)
+    return JSONResponse({"received": True})
+
+
+# ── PLIVO WEBHOOKS ────────────────────────────────────────────────────────────
+# Set TELEPHONY_PROVIDER=plivo in .env to use Plivo.
+# In Plivo console → your number → set Answer URL and Hangup URL.
+#
+# Plivo parameter differences from Exotel:
+#   Exotel CallSid     → Plivo CallUUID
+#   Exotel RecordingUrl → Plivo RecordUrl
+#   No CustomField (lead_id passed as query param in answer_url instead)
+
+@app.api_route("/plivo/incoming", methods=["GET", "POST"])
+async def plivo_incoming(request: Request):
+    """
+    Plivo calls this when a customer calls your Plivo DID number.
+    Set this as the Answer URL in Plivo console for inbound calls.
+    """
+    data     = await _get_params(request)
+    call_sid = data.get("CallUUID", data.get("CallSid", "")).strip()
+    caller   = data.get("From", "").strip()
+
+    print(f"\n[Plivo Incoming] Call from {caller} | UUID: {call_sid}")
+
+    if not call_sid:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+
+    start_call_session(call_sid, caller)
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=True)
+
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    return Response(
+        content=_record_xml(call_sid, say_text=greeting, provider="plivo"),
+        media_type="application/xml"
+    )
+
+
+@app.api_route("/plivo/handler", methods=["GET", "POST"])
+async def plivo_outbound_handler(request: Request):
+    """
+    Plivo calls this when an outbound call connects (answer_url).
+    lead_id is passed as a query param in the answer_url we set when making the call.
+    """
+    data     = await _get_params(request)
+    call_sid = data.get("CallUUID", data.get("CallSid", "")).strip()
+    called   = data.get("To", "").strip()
+    lead_id  = data.get("lead_id", "").strip()  # from query param in answer_url
+
+    print(f"\n[Plivo Outbound] Call to {called} | UUID: {call_sid} | Lead: {lead_id}")
+
+    if not call_sid:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+
+    if call_sid not in active_calls:
+        start_call_session(call_sid, called, lead_id=lead_id)
+
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=False)
+
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    return Response(
+        content=_record_xml(call_sid, say_text=greeting, provider="plivo"),
+        media_type="application/xml"
+    )
+
+
+@app.post("/plivo/gather/{call_sid}")
+async def plivo_gather(call_sid: str, request: Request):
+    """
+    Plivo posts here after <Record> finishes capturing customer speech.
+    Key difference from Exotel: recording URL param is 'RecordUrl' not 'RecordingUrl'.
+    """
+    data = await _get_params(request)
+
+    # Plivo uses RecordUrl; also accept RecordingUrl as fallback
+    recording_url = (data.get("RecordUrl") or data.get("RecordingUrl") or "").strip()
+    digits        = data.get("Digits", "").strip()
+
+    print(f"[Plivo Gather] [{call_sid}] Recording={'yes' if recording_url else 'no'}")
+
+    session = active_calls.get(call_sid)
+    if not session:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+
+    customer_input = digits
+
+    if not customer_input and recording_url:
+        audio_bytes = await _run(_download_recording, recording_url, timeout=6.0)
+        if audio_bytes:
+            stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=5.0)
+            if stt_result:
+                customer_input = stt_result.get("text", "").strip()
+                if customer_input:
+                    session["language"] = stt_result.get("language", "hinglish")
+
+    if not customer_input:
+        silence_count = session.get("silence_count", 0) + 1
+        session["silence_count"] = silence_count
+        if silence_count >= 3:
+            return Response(content=_hangup_xml(), media_type="application/xml")
+        retry_text = "Ji? Kuch clearly suna nahi — thoda louder bol sakte hain?"
+        return Response(
+            content=_record_xml(call_sid, say_text=retry_text, provider="plivo"),
+            media_type="application/xml"
+        )
+
+    session["silence_count"] = 0
+    session["turn_count"] = session.get("turn_count", 0) + 1
+
+    conv     = session["conversation"]
+    ai_reply = await _run(conv.chat, customer_input, timeout=5.0)
+    voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply or "").strip()
+    if not voice_text:
+        voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+
+    print(f"[Plivo Gather] [{call_sid}] Priya: {voice_text[:120]}")
+
+    devanagari_count = sum(1 for c in customer_input if '\u0900' <= c <= '\u097F')
+    lang = "hindi" if devanagari_count > len(customer_input) * 0.3 else session.get("language", "hinglish")
+    session["language"] = lang
+
+    audio_url = None
+    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=9.0)
+    if ai_audio:
+        audio_url = _save_audio(ai_audio, "response", call_sid)
+
+    if audio_url:
+        return Response(
+            content=_record_xml(call_sid, play_url=audio_url, provider="plivo"),
+            media_type="application/xml"
+        )
+    return Response(
+        content=_record_xml(call_sid, say_text=voice_text, provider="plivo"),
+        media_type="application/xml"
+    )
+
+
+@app.api_route("/plivo/status", methods=["GET", "POST"])
+async def plivo_status(request: Request, background_tasks: BackgroundTasks):
+    """Plivo calls this when the call ends (hangup_url)."""
+    data     = await _get_params(request)
+    call_sid = data.get("CallUUID", data.get("CallSid", ""))
+    status   = data.get("CallStatus", data.get("Status", ""))
+    duration = int(data.get("Duration") or data.get("BillDuration") or 0)
+
+    print(f"\n[Plivo Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
 
     background_tasks.add_task(end_call_session, call_sid, duration)
     _cleanup_audio(call_sid)
