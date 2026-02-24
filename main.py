@@ -30,13 +30,14 @@ from call_handler import (
 )
 from agent import get_opening_message
 from lead_manager import process_call_result, add_leads_from_import, get_dashboard_stats
-from exotel_client import make_outbound_call
+from exotel_client import make_outbound_call as _exotel_make_call
+import airtel_iq_client as _airtel_iq
 from scraper import parse_offer_file, scrape_hero_website
 from scheduler import start_scheduler, stop_scheduler
 from voice import synthesize_speech, transcribe_audio, audio_fmt
 
 # ── App setup ──────────────────────────────────────────────────────────────────
-app = FastAPI(title="Shubham Motors AI Agent", version="2.2.0")
+app = FastAPI(title="Shubham Motors AI Agent", version="2.3.0")
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -101,14 +102,13 @@ def _xml_safe(text: str) -> str:
             .replace("'", "&apos;"))
 
 
-def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> str:
+def _record_xml(call_sid: str, play_url: str = None, say_text: str = None,
+                provider: str = "exotel") -> str:
     """
-    Return ExoML that optionally plays audio (or says text), then records customer reply.
+    Return ExoML/TwiML that plays audio (or says text), then records customer reply.
 
-    Uses <Record> — NOT <Gather input="speech">.
-    <Gather input="speech"> is Twilio TwiML and NOT supported by Exotel.
-    <Record> is the correct Exotel verb: records audio and POSTs RecordingUrl
-    to the action webhook, which we download and transcribe.
+    Uses <Record> verb — works on both Exotel and Airtel IQ.
+    The action URL differs by provider so Airtel IQ gather goes to /airtel/gather/.
     """
     content = ""
     if play_url:
@@ -116,10 +116,12 @@ def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> st
     elif say_text:
         content = f'  <Say language="hi-IN" voice="female">{_xml_safe(say_text[:800])}</Say>'
 
+    gather_path = "/airtel/gather/" if provider == "airtel_iq" else "/call/gather/"
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
 {content}
-  <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+  <Record action="{config.PUBLIC_URL}{gather_path}{call_sid}"
           method="POST"
           maxLength="15"
           timeout="5"
@@ -344,11 +346,13 @@ async def handle_gather(call_sid: str, request: Request):
     session["turn_count"] = session.get("turn_count", 0) + 1
     print(f"[Gather] [{call_sid}] Customer (turn {session['turn_count']}): '{customer_input[:120]}'")
 
-    # ── Get AI response from GPT-4o ───────────────────────────────────────────
+    # ── Get AI response (Groq primary, OpenAI fallback) ──────────────────────
+    # Groq responds in 0.3-0.8s; OpenAI GPT-4o takes 3-5s.
+    # Timeout of 5s is generous for Groq, safety net for OpenAI fallback.
     conv       = session["conversation"]
     voice_text = None
 
-    ai_reply = await _run(conv.chat, customer_input, timeout=8.0)
+    ai_reply = await _run(conv.chat, customer_input, timeout=5.0)
     if ai_reply:
         # Strip JSON analysis blocks — those are for internal use only
         voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
@@ -369,7 +373,10 @@ async def handle_gather(call_sid: str, request: Request):
     # ── Generate TTS audio ─────────────────────────────────────────────────────
     # CRITICAL: audio_fmt() detects WAV vs MP3 — saved with correct extension
     audio_url = None
-    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=5.0)
+    # timeout=9s: must be > Sarvam's internal API timeout (8s).
+    # With Groq AI now responding in 0.3-0.8s (vs GPT-4o's 3-5s),
+    # total gather latency is now ~5-7s — within Exotel's 8-10s window.
+    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=9.0)
     if ai_audio:
         audio_url = _save_audio(ai_audio, "response", call_sid)
         ext, _ = audio_fmt(ai_audio)
@@ -525,6 +532,13 @@ def _parse_excel_leads(content: bytes) -> list:
     return result
 
 
+def _make_outbound_call(to_number: str, lead_id: str = "") -> dict:
+    """Route call through configured telephony provider."""
+    if config.TELEPHONY_PROVIDER == "airtel_iq":
+        return _airtel_iq.make_outbound_call(to_number, lead_id)
+    return _exotel_make_call(to_number, lead_id)
+
+
 @app.post("/api/call/make")
 async def trigger_call(request: Request, background_tasks: BackgroundTasks):
     data    = await request.json()
@@ -536,8 +550,166 @@ async def trigger_call(request: Request, background_tasks: BackgroundTasks):
             mobile = lead.get("mobile", "")
     if not mobile:
         raise HTTPException(status_code=400, detail="Mobile number required")
-    background_tasks.add_task(make_outbound_call, mobile, lead_id)
-    return JSONResponse({"success": True, "message": f"Calling {mobile}..."})
+    background_tasks.add_task(_make_outbound_call, mobile, lead_id)
+    return JSONResponse({"success": True, "message": f"Calling {mobile}... (via {config.TELEPHONY_PROVIDER})"})
+
+
+# ── AIRTEL IQ WEBHOOKS ──────────────────────────────────────────────────────────
+# Set TELEPHONY_PROVIDER=airtel_iq in .env to use these instead of Exotel.
+# Airtel IQ sends different parameter names than Exotel but the call flow is the same.
+# Set your Airtel IQ dashboard callback URLs to:
+#   Inbound:  {PUBLIC_URL}/airtel/incoming
+#   Handler:  {PUBLIC_URL}/airtel/handler
+#   Gather:   {PUBLIC_URL}/airtel/gather/{call_sid}
+#   Status:   {PUBLIC_URL}/airtel/status
+
+@app.api_route("/airtel/incoming", methods=["GET", "POST"])
+async def airtel_incoming(request: Request):
+    """
+    Airtel IQ hits this for inbound calls.
+    Parameter names differ from Exotel: CallId vs CallSid, CallerNumber vs From.
+    Returns same ExoML/TwiML XML — Airtel IQ supports standard XML call control.
+    """
+    data     = await _get_params(request)
+    # Airtel IQ uses CallId or callId
+    call_sid = (data.get("CallId") or data.get("callId") or data.get("CallSid", "")).strip()
+    caller   = (data.get("CallerNumber") or data.get("callerNumber") or
+                data.get("From", "")).strip()
+
+    print(f"\n[AirtelIQ Incoming] Call from {caller} | CallId: {call_sid}")
+
+    if not call_sid:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+
+    start_call_session(call_sid, caller)
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=True)
+
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    return Response(
+        content=_record_xml(call_sid, say_text=greeting, provider="airtel_iq"),
+        media_type="application/xml"
+    )
+
+
+@app.api_route("/airtel/handler", methods=["GET", "POST"])
+async def airtel_outbound_handler(request: Request):
+    """Airtel IQ hits this when our outbound call connects."""
+    data     = await _get_params(request)
+    call_sid = (data.get("CallId") or data.get("callId") or data.get("CallSid", "")).strip()
+    called   = (data.get("CalledNumber") or data.get("calledNumber") or
+                data.get("To", "")).strip()
+    lead_id  = (data.get("customData") or data.get("CustomField", "")).strip()
+
+    print(f"\n[AirtelIQ Outbound] Call to {called} | CallId: {call_sid} | Lead: {lead_id}")
+
+    if not call_sid:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+
+    if call_sid not in active_calls:
+        start_call_session(call_sid, called, lead_id=lead_id)
+
+    session  = active_calls.get(call_sid)
+    lead     = session.get("lead") if session else None
+    greeting = get_opening_message(lead, is_inbound=False)
+
+    if session:
+        session["conversation"].history.append({"role": "assistant", "content": greeting})
+
+    return Response(
+        content=_record_xml(call_sid, say_text=greeting, provider="airtel_iq"),
+        media_type="application/xml"
+    )
+
+
+@app.post("/airtel/gather/{call_sid}")
+async def airtel_gather(call_sid: str, request: Request):
+    """
+    Airtel IQ posts here after recording ends.
+    Same logic as Exotel gather — just different parameter names.
+    RecordingUrl → recordingUrl, SpeechResult → speechResult, etc.
+    """
+    data = await _get_params(request)
+
+    # Airtel IQ uses camelCase, Exotel uses PascalCase — handle both
+    recording_url = (data.get("RecordingUrl") or data.get("recordingUrl") or "").strip()
+    speech_result = (data.get("SpeechResult") or data.get("speechResult") or "").strip()
+    digits        = (data.get("Digits") or data.get("digits") or "").strip()
+
+    print(f"[AirtelIQ Gather] [{call_sid}] RecordingUrl={'yes' if recording_url else 'no'}")
+
+    session = active_calls.get(call_sid)
+    if not session:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+
+    customer_input = speech_result or digits
+
+    if not customer_input and recording_url:
+        audio_bytes = await _run(_download_recording, recording_url, timeout=6.0)
+        if audio_bytes:
+            stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=5.0)
+            if stt_result:
+                customer_input = stt_result.get("text", "").strip()
+                detected_lang  = stt_result.get("language", "hinglish")
+                if customer_input:
+                    session["language"] = detected_lang
+
+    if not customer_input:
+        silence_count = session.get("silence_count", 0) + 1
+        session["silence_count"] = silence_count
+        if silence_count >= 3:
+            return Response(content=_hangup_xml(), media_type="application/xml")
+        retry_text = "Ji? Kuch clearly suna nahi — thoda louder bol sakte hain?"
+        return Response(
+            content=_record_xml(call_sid, say_text=retry_text, provider="airtel_iq"),
+            media_type="application/xml"
+        )
+
+    session["silence_count"] = 0
+    session["turn_count"] = session.get("turn_count", 0) + 1
+
+    conv       = session["conversation"]
+    ai_reply   = await _run(conv.chat, customer_input, timeout=5.0)
+    voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply or "").strip()
+    if not voice_text:
+        voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+
+    devanagari_count = sum(1 for c in customer_input if '\u0900' <= c <= '\u097F')
+    lang = "hindi" if devanagari_count > len(customer_input) * 0.3 else session.get("language", "hinglish")
+    session["language"] = lang
+
+    audio_url = None
+    ai_audio  = await _run(synthesize_speech, voice_text, lang, timeout=9.0)
+    if ai_audio:
+        audio_url = _save_audio(ai_audio, "response", call_sid)
+
+    if audio_url:
+        return Response(
+            content=_record_xml(call_sid, play_url=audio_url, provider="airtel_iq"),
+            media_type="application/xml"
+        )
+    return Response(
+        content=_record_xml(call_sid, say_text=voice_text, provider="airtel_iq"),
+        media_type="application/xml"
+    )
+
+
+@app.api_route("/airtel/status", methods=["GET", "POST"])
+async def airtel_status(request: Request, background_tasks: BackgroundTasks):
+    """Airtel IQ call-ended callback."""
+    data     = await _get_params(request)
+    call_sid = (data.get("CallId") or data.get("callId") or data.get("CallSid", ""))
+    status   = (data.get("status") or data.get("Status", ""))
+    duration = int(data.get("duration") or data.get("Duration") or 0)
+
+    print(f"\n[AirtelIQ Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
+
+    background_tasks.add_task(end_call_session, call_sid, duration)
+    _cleanup_audio(call_sid)
+    return JSONResponse({"received": True})
 
 
 @app.post("/api/offers/upload")

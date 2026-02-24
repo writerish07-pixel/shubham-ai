@@ -2,17 +2,75 @@
 agent.py
 The AI brain — builds system prompts, manages conversation,
 classifies leads, extracts next actions from conversations.
-Uses GPT-4o with full Hero catalog + active offers injected.
+
+PRIMARY: Groq (llama-3.3-70b-versatile) — 300+ tokens/sec, ~10x cheaper than GPT-4o.
+         Critical for voice calls: AI response in 0.3-0.8s vs GPT-4o's 3-5s.
+FALLBACK: OpenAI GPT-4o (if GROQ_API_KEY not set).
 """
 import json
 import re
 from datetime import datetime
-from openai import OpenAI
-import config
 from scraper import get_bike_catalog, format_catalog_for_ai
 from sheets_manager import get_active_offers
+import config
 
-client = OpenAI(api_key=config.OPENAI_API_KEY)
+# ── LLM Client Setup ──────────────────────────────────────────────────────────
+# Groq is the primary client for real-time voice AI.
+# It is dramatically faster than OpenAI — essential to keep gather() under 8s.
+
+_groq_client = None
+_openai_client = None
+
+if config.GROQ_API_KEY:
+    try:
+        from groq import Groq
+        _groq_client = Groq(api_key=config.GROQ_API_KEY)
+        print(f"[Agent] Groq client ready — model: {config.GROQ_MODEL}")
+    except ImportError:
+        print("[Agent] groq package not installed. Run: pip install groq")
+
+if config.OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+        print("[Agent] OpenAI client ready (fallback)")
+    except ImportError:
+        pass
+
+if not _groq_client and not _openai_client:
+    print("[Agent] WARNING: No LLM configured. Set GROQ_API_KEY in .env")
+
+
+def _chat_completion(messages: list, max_tokens: int = 120, temperature: float = 0.8) -> str:
+    """
+    Call LLM — Groq first (fast + cheap), OpenAI fallback.
+    Groq llama-3.3-70b: ~300 tokens/sec, ~$0.59/M input tokens.
+    OpenAI GPT-4o:      ~60 tokens/sec,  ~$5/M input tokens.
+    """
+    # Try Groq first
+    if _groq_client:
+        try:
+            resp = _groq_client.chat.completions.create(
+                model=config.GROQ_MODEL,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"[Agent] Groq failed: {e} — falling back to OpenAI")
+
+    # OpenAI fallback
+    if _openai_client:
+        resp = _openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content
+
+    raise RuntimeError("No LLM provider configured")
 
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
@@ -43,7 +101,7 @@ Previous calls: {lead.get('call_count', 0)}
 Temperature: {lead.get('temperature', 'warm')}
 """
 
-    return f"""You are Priya, a friendly and highly professional sales representative for {config.BUSINESS_NAME}, 
+    return f"""You are Priya, a friendly and highly professional sales representative for {config.BUSINESS_NAME},
 an authorized Hero MotoCorp dealership in {config.BUSINESS_CITY}, Rajasthan.
 
 Your PRIMARY goal: Convert every call into a showroom visit or confirmed sale. You are replacing a human telecaller.
@@ -53,7 +111,7 @@ You are NOT just an information bot — you are a CLOSER.
 - Warm, confident, persuasive — like a trusted friend who knows bikes well
 - Speak in Hinglish by default (mix of Hindi and English, natural Indian style)
 - If customer speaks pure Hindi → respond in Hindi
-- If customer speaks English → respond in English  
+- If customer speaks English → respond in English
 - If customer speaks Rajasthani → adapt with some Rajasthani warmth ("Padharo", "Tharo", etc.)
 - Never sound robotic or scripted — be natural and conversational
 - Address customer respectfully: "aap", "ji" — use their name when you know it
@@ -104,6 +162,7 @@ After every call, output a JSON block (hidden from customer) with:
 - If customer asks for something you don't know → "Main confirm karke aapko bata deta/deti hoon"
 - Keep calls under 5 minutes unless customer is engaged and hot
 - Always end with a clear next step
+- Keep responses SHORT (2-3 sentences max) — this is a voice call, not a chat
 """
 
 
@@ -111,39 +170,36 @@ After every call, output a JSON block (hidden from customer) with:
 
 class ConversationManager:
     """Manages per-call conversation history."""
-    
+
     def __init__(self, lead: dict = None):
         self.lead = lead
         self.history = []
         self.system_prompt = build_system_prompt(lead)
-    
+
     def chat(self, user_message: str) -> str:
         self.history.append({"role": "user", "content": user_message})
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": self.system_prompt}] + self.history,
-            temperature=0.8,
-            max_tokens=120,
-        )
-        
-        ai_reply = response.choices[0].message.content
+        messages = [{"role": "system", "content": self.system_prompt}] + self.history
+
+        # max_tokens=150: enough for 2-3 Hindi/Hinglish sentences.
+        # Shorter = faster TTS + lower latency on voice calls.
+        ai_reply = _chat_completion(messages, max_tokens=150, temperature=0.8)
+
         self.history.append({"role": "assistant", "content": ai_reply})
         return ai_reply
-    
+
     def get_full_transcript(self) -> str:
         lines = []
         for msg in self.history:
             role = "Priya (AI)" if msg["role"] == "assistant" else "Customer"
             lines.append(f"{role}: {msg['content']}")
         return "\n".join(lines)
-    
+
     def analyze_call(self) -> dict:
-        """Ask GPT to analyze full conversation and extract structured data."""
+        """Analyze full conversation and extract structured data."""
         transcript = self.get_full_transcript()
         if not transcript.strip():
             return {}
-        
+
         prompt = f"""Analyze this sales call transcript from {config.BUSINESS_NAME} and extract key information.
 
 TRANSCRIPT:
@@ -163,15 +219,13 @@ Return ONLY valid JSON (no markdown, no explanation):
   "sentiment": "positive/neutral/negative",
   "call_outcome": "interested/not_interested/callback_requested/converted/no_answer"
 }}"""
-        
+
         try:
-            r = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+            raw = _chat_completion(
+                [{"role": "user", "content": prompt}],
                 max_tokens=500,
+                temperature=0,
             )
-            raw = r.choices[0].message.content.strip()
             raw = re.sub(r"```json|```", "", raw).strip()
             return json.loads(raw)
         except Exception as e:
@@ -180,17 +234,17 @@ Return ONLY valid JSON (no markdown, no explanation):
 
 
 def get_opening_message(lead: dict = None, is_inbound: bool = False) -> str:
-    """Generate the first thing AI says when call connects."""
+    """Generate the first thing Priya says when call connects."""
     if is_inbound:
         return (
             "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. "
             "Aap ka call receive karke bahut khushi hui! Kaise madad kar sakti hoon aapki? "
             "Koi Hero bike mein interest hai aapka?"
         )
-    
+
     name = lead.get("name", "") if lead else ""
     model = lead.get("interested_model", "") if lead else ""
-    
+
     if name and model:
         return (
             f"Namaste {name} ji! Main Priya bol rahi hoon Shubham Motors se — "

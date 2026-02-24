@@ -190,21 +190,22 @@ def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
 
 def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
     """
-    Call Sarvam TTS API.
-    Returns WAV bytes (RIFF format).
-    The caller (main.py) MUST save as .wav and serve as audio/wav.
+    Call Sarvam TTS API. Returns MP3 bytes (output_audio_codec: mp3).
+
+    TIMEOUT NOTE: This function uses timeout=8s internally.
+    The async wrapper in main.py must use timeout >= 9s to avoid killing this
+    request prematurely (wrapper timeout must be > API timeout).
     """
     headers = {
         "api-subscription-key": config.SARVAM_API_KEY,
         "Content-Type": "application/json",
     }
-    # Sarvam bulbul:v2 supports longer text — truncate at 1000 chars to be safe
-    if len(text) > 1000:
-        truncated = text[:1000]
-        # Try to cut at a sentence boundary
+    # Truncate at 500 chars for voice — shorter text = faster TTS = lower latency
+    if len(text) > 500:
+        truncated = text[:500]
         for sep in ['. ', '! ', '? ', ', ']:
             idx = truncated.rfind(sep)
-            if idx > 500:
+            if idx > 200:
                 truncated = truncated[:idx + 1]
                 break
         text = truncated
@@ -216,7 +217,8 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
         "model": "bulbul:v2",
         "output_audio_codec": "mp3",
     }
-    r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=6)
+    # timeout=8s: Sarvam needs ~2-5s. Must be < async wrapper timeout (9s).
+    r = requests.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=8)
     if r.status_code != 200:
         print(f"[Voice] Sarvam TTS HTTP {r.status_code}: {r.text[:300]}")
     r.raise_for_status()
@@ -224,7 +226,7 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
     audio_b64 = data.get("audios", [""])[0]
     if not audio_b64:
         raise ValueError("Sarvam TTS returned empty audio")
-    return base64.b64decode(audio_b64)  # WAV bytes
+    return base64.b64decode(audio_b64)  # MP3 bytes
 
 
 def _elevenlabs_tts(text: str) -> bytes:

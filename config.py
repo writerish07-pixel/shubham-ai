@@ -9,6 +9,23 @@ EXOTEL_ACCOUNT_SID  = os.getenv("EXOTEL_ACCOUNT_SID", "shubhammotors1")
 EXOTEL_PHONE_NUMBER = os.getenv("EXOTEL_PHONE_NUMBER", "+919513886363")
 EXOTEL_SUBDOMAIN    = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
+# Airtel IQ — Indian number provider, competitive pricing
+# Get API credentials from: https://iq.airtel.in/developer
+AIRTEL_IQ_API_KEY      = os.getenv("AIRTEL_IQ_API_KEY", "")
+AIRTEL_IQ_API_SECRET   = os.getenv("AIRTEL_IQ_API_SECRET", "")
+AIRTEL_IQ_ACCOUNT_ID   = os.getenv("AIRTEL_IQ_ACCOUNT_ID", "")
+AIRTEL_IQ_PHONE_NUMBER = os.getenv("AIRTEL_IQ_PHONE_NUMBER", "")
+AIRTEL_IQ_SUBDOMAIN    = os.getenv("AIRTEL_IQ_SUBDOMAIN", "api.airtel.in")
+
+# TELEPHONY_PROVIDER: "exotel" or "airtel_iq"
+TELEPHONY_PROVIDER = os.getenv("TELEPHONY_PROVIDER", "exotel")
+
+# Groq — 10x faster than OpenAI, 10x cheaper. Best for real-time voice AI.
+# Get free API key: https://console.groq.com
+# Models: llama-3.3-70b-versatile (best), llama-3.1-8b-instant (fastest)
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL          = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
 DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")

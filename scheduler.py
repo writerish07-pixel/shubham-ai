@@ -11,8 +11,16 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 import config
 import sheets_manager as db
-from exotel_client import make_outbound_call
+import exotel_client as _exotel
+import airtel_iq_client as _airtel_iq
 from scraper import scrape_hero_website
+
+
+def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
+    """Route through configured telephony provider."""
+    if config.TELEPHONY_PROVIDER == "airtel_iq":
+        return _airtel_iq.make_outbound_call(to_number, lead_id)
+    return _exotel.make_outbound_call(to_number, lead_id)
 
 IST = pytz.timezone("Asia/Kolkata")
 scheduler = BackgroundScheduler(timezone=IST)
