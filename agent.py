@@ -138,7 +138,7 @@ class ConversationManager:
         return "\n".join(lines)
     
     def analyze_call(self) -> dict:
-        """Ask GPT to analyze full conversation and extract structured data."""
+        """Ask Groq to analyze full conversation and extract structured data."""
         transcript = self.get_full_transcript()
         if not transcript.strip():
             return {}
