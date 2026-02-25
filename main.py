@@ -51,11 +51,17 @@ _executor = ThreadPoolExecutor(max_workers=12)
 
 @app.on_event("startup")
 async def startup():
+    _provider_numbers = {
+        "airtel_iq": config.AIRTEL_IQ_PHONE_NUMBER,
+        "plivo": config.PLIVO_PHONE_NUMBER,
+        "exotel": config.EXOTEL_PHONE_NUMBER,
+    }
+    _active_number = _provider_numbers.get(config.TELEPHONY_PROVIDER, config.EXOTEL_PHONE_NUMBER)
     print(f"\n{'='*60}")
     print(f"  SHUBHAM MOTORS AI AGENT — STARTING UP")
     print(f"  {config.BUSINESS_NAME}, {config.BUSINESS_CITY}")
     print(f"  Public URL: {config.PUBLIC_URL}")
-    print(f"  Exophone: {config.EXOTEL_PHONE_NUMBER}")
+    print(f"  Provider: {config.TELEPHONY_PROVIDER.upper()} | Number: {_active_number}")
     print(f"  Sarvam TTS: {'READY' if config.SARVAM_API_KEY else 'NOT CONFIGURED'}")
     print(f"  ElevenLabs: {'READY' if config.ELEVENLABS_API_KEY else 'NOT CONFIGURED'}")
     print(f"{'='*60}\n")
@@ -171,17 +177,25 @@ def _serve_audio(prefix: str, call_sid: str) -> Response:
 
 def _download_recording(url: str) -> bytes:
     """
-    Download a <Record> audio file from Exotel.
-    Exotel requires API key+token authentication for recording URLs.
+    Download a <Record> audio file from the active telephony provider.
+    Exotel uses HTTP Basic auth; Airtel IQ uses X-API-KEY/X-API-SECRET headers.
     """
     try:
-        r = _requests.get(
-            url,
-            auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
-            timeout=15
-        )
+        if config.TELEPHONY_PROVIDER == "airtel_iq":
+            headers = {
+                "X-API-KEY": config.AIRTEL_IQ_API_KEY,
+                "X-API-SECRET": config.AIRTEL_IQ_API_SECRET,
+            }
+            r = _requests.get(url, headers=headers, timeout=15)
+        else:
+            # Exotel (and default): Basic auth with API key + token
+            r = _requests.get(
+                url,
+                auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
+                timeout=15
+            )
         r.raise_for_status()
-        print(f"[Audio] Downloaded {len(r.content)} bytes from Exotel")
+        print(f"[Audio] Downloaded {len(r.content)} bytes from {config.TELEPHONY_PROVIDER}")
         return r.content
     except Exception as e:
         print(f"[Audio] Download failed: {e}")
