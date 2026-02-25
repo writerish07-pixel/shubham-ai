@@ -1,6 +1,6 @@
 """
 voice.py
-Handles Speech-to-Text (Deepgram + Sarvam) and Text-to-Speech (ElevenLabs + Sarvam).
+Handles Speech-to-Text (Deepgram primary, Sarvam fallback) and Text-to-Speech (Sarvam).
 Detects language and routes to best provider.
 """
 import io, base64, requests
@@ -9,7 +9,6 @@ import config
 
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
-ELEVENLABS_TTS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{config.ELEVENLABS_VOICE_ID}"
 
 
 # ── SPEECH TO TEXT ────────────────────────────────────────────────────────────
@@ -113,7 +112,7 @@ def _normalize_lang(code: str) -> str:
 def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
     """
     Convert text to audio bytes (WAV/MP3).
-    Uses ElevenLabs for English/Hinglish, Sarvam for pure Hindi.
+    Uses Sarvam AI TTS for all languages (Hindi, Hinglish, English).
     """
     # Clean text — remove markdown, JSON blocks
     import re
@@ -124,37 +123,18 @@ def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
     if not text:
         return b""
     
-    if language == "hindi":
-        try:
-            return _sarvam_tts(text, "hi-IN")
-        except Exception as e:
-            print(f"[Voice] Sarvam TTS failed: {e}, using ElevenLabs")
+    # Map language to Sarvam language code
+    lang_code = "hi-IN"
+    if language == "english":
+        lang_code = "en-IN"
+    elif language in ("hinglish", "hindi", "rajasthani"):
+        lang_code = "hi-IN"
     
     try:
-        return _elevenlabs_tts(text)
+        return _sarvam_tts(text, lang_code)
     except Exception as e:
-        print(f"[Voice] ElevenLabs TTS failed: {e}")
+        print(f"[Voice] Sarvam TTS failed: {e}")
         return b""
-
-
-def _elevenlabs_tts(text: str) -> bytes:
-    headers = {
-        "xi-api-key": config.ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "style": 0.3,
-            "use_speaker_boost": True
-        }
-    }
-    r = requests.post(ELEVENLABS_TTS_URL, headers=headers, json=payload, timeout=20)
-    r.raise_for_status()
-    return r.content  # MP3 bytes
 
 
 def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:

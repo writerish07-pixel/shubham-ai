@@ -9,11 +9,11 @@ EXOTEL_ACCOUNT_SID  = os.getenv("EXOTEL_ACCOUNT_SID", "shubhammotors1")
 EXOTEL_PHONE_NUMBER = os.getenv("EXOTEL_PHONE_NUMBER", "+919513886363")
 EXOTEL_SUBDOMAIN    = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
 
-OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL          = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "")
-ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "fG9s0SXJb213f4UxVHyG")
 SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY", "")
+NGROK_AUTH_TOKEN    = os.getenv("NGROK_AUTH_TOKEN", "")
 
 GOOGLE_SHEET_ID     = os.getenv("GOOGLE_SHEET_ID", "")
 try:

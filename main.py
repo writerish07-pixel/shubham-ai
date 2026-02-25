@@ -8,7 +8,7 @@ KEY DESIGN NOTES:
 - All TTS/STT/AI calls are blocking HTTP — run them in a ThreadPoolExecutor.
 - Exotel ExoML uses <Record> (NOT <Gather input="speech"> which is Twilio TwiML)
   <Record> captures customer audio → Exotel POSTs RecordingUrl → we download + STT.
-- Always have a <Say> fallback in case ElevenLabs TTS is slow/unavailable.
+- Always have a <Say> fallback in case Sarvam TTS is slow/unavailable.
 """
 
 import os, json, re, io, asyncio
@@ -39,7 +39,7 @@ app = FastAPI(title="Shubham Motors AI Agent", version="2.1.0")
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-# Thread pool for ALL blocking I/O (ElevenLabs TTS, Deepgram STT, OpenAI GPT)
+# Thread pool for ALL blocking I/O (Sarvam TTS, Deepgram STT, Groq LLM)
 # This prevents blocking the FastAPI async event loop
 _executor = ThreadPoolExecutor(max_workers=12)
 
@@ -189,7 +189,7 @@ async def incoming_call(request: Request):
     start_call_session(call_sid, caller)
 
     # Generate personalized greeting audio — async with 8s timeout
-    # Falls back to Exotel <Say> (built-in TTS) if ElevenLabs is slow
+    # Falls back to Exotel <Say> (built-in TTS) if Sarvam is slow
     opening_url = None
     try:
         opening_audio = await _run(get_opening_audio, call_sid, timeout=8.0)
@@ -277,7 +277,7 @@ async def handle_gather(call_sid: str, request: Request):
     For <Record> responses: form contains RecordingUrl (audio file URL)
     For <Gather> responses: form contains SpeechResult or Digits
 
-    We download the recording → STT (Deepgram/Sarvam) → GPT-4o → TTS → return ExoML.
+    We download the recording → STT (Deepgram/Sarvam) → Groq LLM → TTS → return ExoML.
     All heavy operations run async in ThreadPoolExecutor with timeouts.
     """
     form = await request.form()
@@ -335,7 +335,7 @@ async def handle_gather(call_sid: str, request: Request):
 
     print(f"[Gather] [{call_sid}] Customer (turn {session['turn_count']}): '{customer_input[:120]}'")
 
-    # ── Get AI response via GPT-4o ────────────────────────────────────────────
+    # ── Get AI response via Groq LLM ─────────────────────────────────────────
     conv = session["conversation"]
     voice_text = None
 
