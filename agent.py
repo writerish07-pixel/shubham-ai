@@ -2,16 +2,16 @@
 agent.py
 The AI brain — builds system prompts, manages conversation,
 classifies leads, extracts next actions from conversations.
-Uses GPT-4o with full Hero catalog + active offers injected.
+Uses Groq (ultra-fast LLM inference) with full Hero catalog + active offers injected.
 """
 import json, re
 from datetime import datetime, timedelta
-from openai import OpenAI
+from groq import Groq
 import config
 from scraper import get_bike_catalog, format_catalog_for_ai
 from sheets_manager import get_active_offers
 
-client = OpenAI(api_key=config.OPENAI_API_KEY)
+client = Groq(api_key=config.GROQ_API_KEY)
 
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
@@ -120,7 +120,7 @@ class ConversationManager:
         self.history.append({"role": "user", "content": user_message})
         
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=config.GROQ_MODEL,
             messages=[{"role": "system", "content": self.system_prompt}] + self.history,
             temperature=0.8,
             max_tokens=300,
@@ -165,7 +165,7 @@ Return ONLY valid JSON (no markdown, no explanation):
         
         try:
             r = client.chat.completions.create(
-                model="gpt-4o",
+                model=config.GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 max_tokens=500,

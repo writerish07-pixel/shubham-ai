@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 import config
 import sheets_manager as db
-from exotel_client import make_outbound_call
+from exotel_client import make_outbound_call, check_connection
 from scraper import scrape_hero_website
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -84,6 +84,13 @@ def refresh_bike_catalog():
     print("[Scheduler] Catalog refreshed")
 
 
+def heartbeat_check():
+    """Periodic Exotel connectivity check with logging."""
+    ok = check_connection()
+    if not ok:
+        print("[Scheduler] ⚠️  Exotel heartbeat FAILED — check API credentials and network")
+
+
 def start_scheduler():
     """Start all scheduled jobs."""
     # Every 5 minutes: follow-up calls
@@ -107,6 +114,14 @@ def start_scheduler():
         refresh_bike_catalog,
         CronTrigger(hour=0, minute=5, timezone=IST),
         id="catalog_refresh",
+        replace_existing=True
+    )
+    
+    # Every 10 minutes: Exotel heartbeat / connectivity check
+    scheduler.add_job(
+        heartbeat_check,
+        "interval", minutes=10,
+        id="exotel_heartbeat",
         replace_existing=True
     )
     
