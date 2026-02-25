@@ -72,7 +72,7 @@ def get_opening_audio(call_sid: str) -> bytes:
 
 def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
     """
-    Core loop: audio in → STT → GPT → TTS → audio out
+    Core loop: audio in → STT → Groq → TTS → audio out
     Returns audio bytes to play back to customer.
     """
     session = active_calls.get(call_sid)
