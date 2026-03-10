@@ -4,11 +4,16 @@ Manages active call sessions.
 Exotel calls our webhook → we stream AI voice back.
 Each call gets a ConversationManager instance.
 """
+import logging
+import re
 import time
 from typing import Dict
+
 from agent import ConversationManager, get_opening_message
 from voice import transcribe_audio, synthesize_speech
 import sheets_manager as db
+
+log = logging.getLogger("shubham-ai.calls")
 
 # In-memory store of active calls: call_sid → session data
 active_calls: Dict[str, dict] = {}
@@ -47,7 +52,7 @@ def start_call_session(call_sid: str, caller_number: str, lead_id: str = None) -
     }
     
     active_calls[call_sid] = session
-    print(f"[CallHandler] Session started | SID: {call_sid} | Lead: {lead_id} | Inbound: {is_inbound}")
+    log.info("Session started | SID: %s | Lead: %s | Inbound: %s", call_sid, lead_id, is_inbound)
     return session
 
 
@@ -67,7 +72,7 @@ def get_opening_audio(call_sid: str) -> bytes:
     })
     
     audio = synthesize_speech(opening_text, session.get("language", "hinglish"))
-    return audio
+    return audio if audio else b""
 
 
 def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
@@ -86,24 +91,23 @@ def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
     
     if not customer_text:
         # Silence / unclear audio
-        silence_reply = "Ji? Kuch suna nahi — kya aap phir se bol sakte hain?"
-        return synthesize_speech(silence_reply, session["language"])
-    
+        silence_reply = "Ji? Kuch suna nahi -- kya aap phir se bol sakte hain?"
+        return synthesize_speech(silence_reply, session["language"]) or b""
+
     # Update detected language
     session["language"] = detected_lang
     session["turn_count"] += 1
-    
-    print(f"[CallHandler] [{call_sid}] Customer: {customer_text}")
-    
+
+    log.info("[%s] Customer: %s", call_sid, customer_text)
+
     # 2. Get AI response
     conv = session["conversation"]
     ai_reply = conv.chat(customer_text)
-    
-    # Strip any JSON analysis block from voice response
-    import re
-    voice_text = re.sub(r'\{[\s\S]*\}', '', ai_reply).strip()
-    
-    print(f"[CallHandler] [{call_sid}] Priya: {voice_text[:100]}...")
+
+    # Strip any JSON analysis block from voice response (non-greedy)
+    voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
+
+    log.info("[%s] Priya: %s", call_sid, voice_text[:100])
     
     # 3. Text to Speech
     audio_out = synthesize_speech(voice_text, detected_lang)
@@ -120,22 +124,34 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
         return {}
     
     from lead_manager import process_call_result
-    
+
     conv = session["conversation"]
     transcript = conv.get_full_transcript()
-    analysis = conv.analyze_call()
-    
+
+    try:
+        analysis = conv.analyze_call()
+    except Exception as exc:
+        log.error("Call analysis failed for SID %s: %s", call_sid, exc)
+        analysis = {"temperature": "warm", "next_action": "followup_call", "notes": "Analysis error"}
+
     lead_id = session.get("lead_id", "")
-    actual_duration = int(time.time() - session["start_time"]) if not duration_sec else duration_sec
-    
-    print(f"[CallHandler] Call ended | SID: {call_sid} | Duration: {actual_duration}s | Analysis: {analysis.get('temperature','?')} / {analysis.get('call_outcome','?')}")
-    
-    process_call_result(
-        lead_id=lead_id,
-        analysis=analysis,
-        transcript=transcript,
-        duration_sec=actual_duration,
-        direction="inbound" if session.get("is_inbound") else "outbound"
+    actual_duration = duration_sec if duration_sec else int(time.time() - session["start_time"])
+
+    log.info(
+        "Call ended | SID: %s | Duration: %ss | Analysis: %s / %s",
+        call_sid, actual_duration,
+        analysis.get('temperature', '?'), analysis.get('call_outcome', '?'),
     )
-    
+
+    try:
+        process_call_result(
+            lead_id=lead_id,
+            analysis=analysis,
+            transcript=transcript,
+            duration_sec=actual_duration,
+            direction="inbound" if session.get("is_inbound") else "outbound",
+        )
+    except Exception as exc:
+        log.error("process_call_result failed for SID %s: %s", call_sid, exc)
+
     return analysis

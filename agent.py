@@ -4,14 +4,25 @@ The AI brain — builds system prompts, manages conversation,
 classifies leads, extracts next actions from conversations.
 Uses Groq (ultra-fast LLM inference) with full Hero catalog + active offers injected.
 """
-import json, re
+import json
+import logging
+import re
 from datetime import datetime, timedelta
+
 from groq import Groq
+
 import config
 from scraper import get_bike_catalog, format_catalog_for_ai
 from sheets_manager import get_active_offers
 
-client = Groq(api_key=config.GROQ_API_KEY)
+log = logging.getLogger("shubham-ai.agent")
+
+
+def _get_groq_client() -> Groq:
+    """Lazy-initialise Groq client so missing key doesn't crash at import time."""
+    if not config.GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+    return Groq(api_key=config.GROQ_API_KEY)
 
 
 # ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
@@ -118,15 +129,20 @@ class ConversationManager:
     
     def chat(self, user_message: str) -> str:
         self.history.append({"role": "user", "content": user_message})
-        
-        response = client.chat.completions.create(
-            model=config.GROQ_MODEL,
-            messages=[{"role": "system", "content": self.system_prompt}] + self.history,
-            temperature=0.8,
-            max_tokens=300,
-        )
-        
-        ai_reply = response.choices[0].message.content
+
+        try:
+            client = _get_groq_client()
+            response = client.chat.completions.create(
+                model=config.GROQ_MODEL,
+                messages=[{"role": "system", "content": self.system_prompt}] + self.history,
+                temperature=0.8,
+                max_tokens=300,
+            )
+            ai_reply = response.choices[0].message.content
+        except Exception as exc:
+            log.error("Groq chat failed: %s", exc)
+            ai_reply = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+
         self.history.append({"role": "assistant", "content": ai_reply})
         return ai_reply
     
@@ -164,6 +180,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 }}"""
         
         try:
+            client = _get_groq_client()
             r = client.chat.completions.create(
                 model=config.GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
@@ -174,7 +191,7 @@ Return ONLY valid JSON (no markdown, no explanation):
             raw = re.sub(r"```json|```", "", raw).strip()
             return json.loads(raw)
         except Exception as e:
-            print(f"[Agent] Call analysis failed: {e}")
+            log.error("Call analysis failed: %s", e)
             return {"temperature": "warm", "next_action": "followup_call", "notes": "Analysis failed"}
 
 

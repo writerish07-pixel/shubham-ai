@@ -3,9 +3,14 @@ exotel_client.py
 All Exotel API calls: make outbound calls, get call status, send SMS.
 Includes retry logic with exponential backoff and connection stability features.
 """
+import logging
 import time
+
 import requests
+
 import config
+
+log = logging.getLogger("shubham-ai.exotel")
 
 # ── CONNECTION STABILITY HELPERS ──────────────────────────────────────────────
 
@@ -27,12 +32,15 @@ def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
         except (requests.ConnectionError, requests.Timeout) as exc:
             last_exc = exc
             wait = _RETRY_BACKOFF_BASE ** attempt
-            print(f"[Exotel] Transient error (attempt {attempt + 1}/{_MAX_RETRIES}): {exc} — retrying in {wait}s")
+            log.warning(
+                "Transient error (attempt %d/%d): %s -- retrying in %ds",
+                attempt + 1, _MAX_RETRIES, exc, wait,
+            )
             time.sleep(wait)
-        except requests.HTTPError as exc:
-            # 4xx errors are not transient — don't retry
+        except requests.HTTPError:
+            # 4xx errors are not transient -- don't retry
             raise
-    raise last_exc
+    raise last_exc  # type: ignore[misc]
 
 
 def check_connection() -> bool:
@@ -40,15 +48,18 @@ def check_connection() -> bool:
     Heartbeat check: verify Exotel API is reachable.
     Returns True if connection is healthy.
     """
-    url = (
-        f"https://{config.EXOTEL_API_KEY}:{config.EXOTEL_API_TOKEN}"
-        f"@{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}"
-    )
+    if not config.EXOTEL_API_KEY or not config.EXOTEL_API_TOKEN:
+        log.warning("Exotel credentials not configured, skipping heartbeat")
+        return False
+    url = f"https://{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}"
     try:
-        _request_with_retry("GET", url, timeout=10)
+        _request_with_retry(
+            "GET", url, timeout=10,
+            auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
+        )
         return True
     except Exception as e:
-        print(f"[Exotel] Heartbeat failed: {e}")
+        log.warning("Heartbeat failed: %s", e)
         return False
 
 
@@ -58,7 +69,10 @@ def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
     Exotel will call the customer and bridge to our webhook for AI handling.
     Uses retry logic with exponential backoff for stable connections.
     """
-    url = f"https://{config.EXOTEL_API_KEY}:{config.EXOTEL_API_TOKEN}@{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Calls/connect"
+    if not config.EXOTEL_API_KEY or not config.EXOTEL_API_TOKEN:
+        log.error("Cannot make call -- Exotel credentials not configured")
+        return {"success": False, "error": "Exotel credentials not configured"}
+    url = f"https://{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Calls/connect"
     
     # Exotel passthru URL — our app handles the call logic via webhook
     call_handler_url = f"{config.PUBLIC_URL}/call/handler"
@@ -76,19 +90,22 @@ def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
     }
     
     try:
-        r = _request_with_retry("POST", url, data=payload, timeout=15)
+        r = _request_with_retry(
+            "POST", url, data=payload, timeout=15,
+            auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
+        )
         data = r.json()
         call_sid = data.get("Call", {}).get("Sid", "")
-        print(f"[Exotel] Outbound call initiated to {to_number} | SID: {call_sid}")
+        log.info("Outbound call initiated to %s | SID: %s", to_number, call_sid)
         return {"success": True, "call_sid": call_sid, "data": data}
     except Exception as e:
-        print(f"[Exotel] Call failed to {to_number}: {e}")
+        log.error("Call failed to %s: %s", to_number, e)
         return {"success": False, "error": str(e)}
 
 
 def send_sms(to_number: str, message: str) -> dict:
     """Send SMS via Exotel with retry on transient errors."""
-    url = f"https://{config.EXOTEL_API_KEY}:{config.EXOTEL_API_TOKEN}@{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Sms/send"
+    url = f"https://{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Sms/send"
     
     payload = {
         "From": config.EXOTEL_PHONE_NUMBER,
@@ -97,19 +114,25 @@ def send_sms(to_number: str, message: str) -> dict:
     }
     
     try:
-        _request_with_retry("POST", url, data=payload, timeout=10)
-        print(f"[Exotel] SMS sent to {to_number}")
+        _request_with_retry(
+            "POST", url, data=payload, timeout=10,
+            auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
+        )
+        log.info("SMS sent to %s", to_number)
         return {"success": True}
     except Exception as e:
-        print(f"[Exotel] SMS failed to {to_number}: {e}")
+        log.error("SMS failed to %s: %s", to_number, e)
         return {"success": False, "error": str(e)}
 
 
 def get_call_details(call_sid: str) -> dict:
     """Fetch call details from Exotel."""
-    url = f"https://{config.EXOTEL_API_KEY}:{config.EXOTEL_API_TOKEN}@{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Calls/{call_sid}"
+    url = f"https://{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Calls/{call_sid}"
     try:
-        r = _request_with_retry("GET", url, timeout=10)
+        r = _request_with_retry(
+            "GET", url, timeout=10,
+            auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
+        )
         return r.json()
     except Exception as e:
         return {"error": str(e)}
