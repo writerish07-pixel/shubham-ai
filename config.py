@@ -1,43 +1,82 @@
-"""config.py — Central configuration loader"""
-import os, json
+"""config.py — Central configuration loader with validation."""
+import os
+import json
+import logging
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
-EXOTEL_API_KEY      = os.getenv("EXOTEL_API_KEY", "")
-EXOTEL_API_TOKEN    = os.getenv("EXOTEL_API_TOKEN", "")
-EXOTEL_ACCOUNT_SID  = os.getenv("EXOTEL_ACCOUNT_SID", "shubhammotors1")
-EXOTEL_PHONE_NUMBER = os.getenv("EXOTEL_PHONE_NUMBER", "+919513886363")
-EXOTEL_SUBDOMAIN    = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com")
+log = logging.getLogger("shubham-ai")
 
-GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL          = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "")
-SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY", "")
-NGROK_AUTH_TOKEN    = os.getenv("NGROK_AUTH_TOKEN", "")
+# -- Exotel telephony ---------------------------------------------------------
+EXOTEL_API_KEY      = os.getenv("EXOTEL_API_KEY", "").strip()
+EXOTEL_API_TOKEN    = os.getenv("EXOTEL_API_TOKEN", "").strip()
+EXOTEL_ACCOUNT_SID  = os.getenv("EXOTEL_ACCOUNT_SID", "shubhammotors1").strip()
+EXOTEL_PHONE_NUMBER = os.getenv("EXOTEL_PHONE_NUMBER", "+919513886363").strip()
+EXOTEL_SUBDOMAIN    = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com").strip()
 
-GOOGLE_SHEET_ID     = os.getenv("GOOGLE_SHEET_ID", "")
+# -- AI / ML APIs -------------------------------------------------------------
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL          = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "").strip()
+SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY", "").strip()
+NGROK_AUTH_TOKEN    = os.getenv("NGROK_AUTH_TOKEN", "").strip()
+
+# -- Google Sheets (optional) -------------------------------------------------
+GOOGLE_SHEET_ID     = os.getenv("GOOGLE_SHEET_ID", "").strip()
 try:
     GOOGLE_CREDENTIALS = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON", "{}"))
 except Exception:
     GOOGLE_CREDENTIALS = {}
 
-BUSINESS_NAME       = os.getenv("BUSINESS_NAME", "Shubham Motors")
-BUSINESS_CITY       = os.getenv("BUSINESS_CITY", "Jaipur")
-WEBSITE_URL         = os.getenv("WEBSITE_URL", "")
+# -- Business info ------------------------------------------------------------
+BUSINESS_NAME       = os.getenv("BUSINESS_NAME", "Shubham Motors").strip()
+BUSINESS_CITY       = os.getenv("BUSINESS_CITY", "Jaipur").strip()
+WEBSITE_URL         = os.getenv("WEBSITE_URL", "").strip()
 WORKING_HOURS_START = int(os.getenv("WORKING_HOURS_START", "9"))
 WORKING_HOURS_END   = int(os.getenv("WORKING_HOURS_END", "19"))
-WORKING_DAYS        = os.getenv("WORKING_DAYS", "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday").split(",")
+WORKING_DAYS        = [
+    d.strip() for d in os.getenv(
+        "WORKING_DAYS",
+        "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday",
+    ).split(",")
+    if d.strip()
+]
 
+# -- Sales team ---------------------------------------------------------------
 SALES_TEAM = []
 for _i in range(1, 6):
-    _n = os.getenv(f"SALESPERSON_{_i}_NAME")
-    _m = os.getenv(f"SALESPERSON_{_i}_MOBILE")
+    _n = (os.getenv(f"SALESPERSON_{_i}_NAME") or "").strip()
+    _m = (os.getenv(f"SALESPERSON_{_i}_MOBILE") or "").strip()
     if _n and _m:
         SALES_TEAM.append({"name": _n, "mobile": _m})
 
+# -- Call settings ------------------------------------------------------------
 MAX_FOLLOWUP_ATTEMPTS   = int(os.getenv("MAX_FOLLOWUP_ATTEMPTS", "3"))
-DEFAULT_FOLLOWUP_TIME   = os.getenv("DEFAULT_FOLLOWUP_TIME", "10:00")
-DEFAULT_LANGUAGE        = os.getenv("DEFAULT_LANGUAGE", "hinglish")
+DEFAULT_FOLLOWUP_TIME   = os.getenv("DEFAULT_FOLLOWUP_TIME", "10:00").strip()
+DEFAULT_LANGUAGE        = os.getenv("DEFAULT_LANGUAGE", "hinglish").strip()
 SILENCE_TIMEOUT_SECONDS = int(os.getenv("SILENCE_TIMEOUT_SECONDS", "5"))
-PUBLIC_URL              = os.getenv("PUBLIC_URL", "http://localhost:5000")
+PUBLIC_URL              = os.getenv("PUBLIC_URL", "http://localhost:5000").strip()
 PORT                    = int(os.getenv("PORT", "5000"))
+
+
+# -- Startup validation -------------------------------------------------------
+def validate_config() -> list:
+    """Return a list of warnings about missing/invalid configuration."""
+    warnings = []
+    if not EXOTEL_API_KEY:
+        warnings.append("EXOTEL_API_KEY is not set -- outbound calls will fail")
+    if not EXOTEL_API_TOKEN:
+        warnings.append("EXOTEL_API_TOKEN is not set -- outbound calls will fail")
+    if not GROQ_API_KEY:
+        warnings.append("GROQ_API_KEY is not set -- AI conversations will fail")
+    if not SARVAM_API_KEY:
+        warnings.append("SARVAM_API_KEY is not set -- TTS/STT will fall back to Deepgram only")
+    if not DEEPGRAM_API_KEY:
+        warnings.append("DEEPGRAM_API_KEY is not set -- STT fallback unavailable")
+    if PUBLIC_URL == "http://localhost:5000":
+        warnings.append("PUBLIC_URL is localhost -- Exotel webhooks require a public URL (use ngrok)")
+    if not SALES_TEAM:
+        warnings.append("No salesperson configured -- hot lead assignment disabled")
+    return warnings

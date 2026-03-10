@@ -4,15 +4,27 @@ Scrapes Hero MotoCorp bike models, prices from the dealership website.
 Runs once on startup and refreshes every 24 hours.
 Also parses uploaded offer files (PDF / Excel / Image).
 """
-import os, re, json
-import requests
-import pdfplumber
-import pandas as pd
-from PIL import Image
-import pytesseract
-from bs4 import BeautifulSoup
+import json
+import logging
+import os
+import re
 from pathlib import Path
+
+import pandas as pd
+import pdfplumber
+import requests
+from bs4 import BeautifulSoup
+from PIL import Image
+
 import config
+
+log = logging.getLogger("shubham-ai.scraper")
+
+# pytesseract is optional -- only needed for image-based offer parsing
+try:
+    import pytesseract as _pytesseract
+except ImportError:
+    _pytesseract = None
 
 CACHE_FILE = Path("data/bikes_cache.json")
 CACHE_FILE.parent.mkdir(exist_ok=True)
@@ -39,9 +51,15 @@ HERO_MODELS_FALLBACK = [
 
 def scrape_hero_website() -> list:
     """Try to scrape live prices from Hero website, fall back to hardcoded list."""
+    if not config.WEBSITE_URL:
+        log.info("WEBSITE_URL not configured, using fallback catalog")
+        _save_cache(HERO_MODELS_FALLBACK)
+        return HERO_MODELS_FALLBACK
+
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         r = requests.get(config.WEBSITE_URL, headers=headers, timeout=10)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
         bikes = []
@@ -52,7 +70,8 @@ def scrape_hero_website() -> list:
             if name_el:
                 model = name_el.get_text(strip=True)
                 price_text = price_el.get_text(strip=True) if price_el else ""
-                nums = re.findall(r"[\d,]+", price_text.replace(",",""))
+                clean_text = price_text.replace(",", "")
+                nums = re.findall(r"\d+", clean_text)
                 price_min = int(nums[0]) if nums else 0
                 price_max = int(nums[-1]) if len(nums) > 1 else price_min
                 bikes.append({"model": model, "price_min": price_min, "price_max": price_max,
@@ -62,7 +81,7 @@ def scrape_hero_website() -> list:
             _save_cache(bikes)
             return bikes
     except Exception as e:
-        print(f"[Scraper] Website scrape failed: {e}, using fallback data")
+        log.warning("Website scrape failed: %s, using fallback data", e)
 
     _save_cache(HERO_MODELS_FALLBACK)
     return HERO_MODELS_FALLBACK
@@ -146,6 +165,8 @@ def _parse_excel(path: str) -> str:
 
 
 def _parse_image(path: str) -> str:
+    if _pytesseract is None:
+        return "(pytesseract not installed -- cannot extract text from images)"
     img = Image.open(path)
-    text = pytesseract.image_to_string(img, lang="eng+hin")
+    text = _pytesseract.image_to_string(img, lang="eng+hin")
     return text.strip()

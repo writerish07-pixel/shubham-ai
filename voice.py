@@ -3,9 +3,16 @@ voice.py
 Handles Speech-to-Text (Deepgram primary, Sarvam fallback) and Text-to-Speech (Sarvam).
 Detects language and routes to best provider.
 """
-import io, base64, requests
-import httpx
+import base64
+import io
+import logging
+import re
+
+import requests
+
 import config
+
+log = logging.getLogger("shubham-ai.voice")
 
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
@@ -19,19 +26,22 @@ def transcribe_audio(audio_bytes: bytes, language_hint: str = "hi-IN") -> dict:
     Returns {"text": "...", "language": "hi/en/hinglish", "confidence": 0.95}
     Tries Sarvam first (better for Hindi/Hinglish), falls back to Deepgram.
     """
+    if not audio_bytes:
+        return {"text": "", "language": "unknown", "confidence": 0.0}
+
     # Try Sarvam AI first for Hindi/Hinglish
     try:
         result = _sarvam_stt(audio_bytes, language_hint)
         if result.get("text"):
             return result
     except Exception as e:
-        print(f"[Voice] Sarvam STT failed: {e}, trying Deepgram")
-    
+        log.warning("Sarvam STT failed: %s, trying Deepgram", e)
+
     # Fallback to Deepgram
     try:
         return _deepgram_stt(audio_bytes)
     except Exception as e:
-        print(f"[Voice] Deepgram STT failed: {e}")
+        log.warning("Deepgram STT also failed: %s", e)
         return {"text": "", "language": "unknown", "confidence": 0.0}
 
 
@@ -114,26 +124,25 @@ def synthesize_speech(text: str, language: str = "hinglish") -> bytes:
     Convert text to audio bytes (WAV/MP3).
     Uses Sarvam AI TTS for all languages (Hindi, Hinglish, English).
     """
-    # Clean text — remove markdown, JSON blocks
-    import re
+    # Clean text -- remove markdown, JSON blocks
     text = re.sub(r'\{[^}]+\}', '', text, flags=re.DOTALL)
     text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
     text = text.strip()
-    
+
     if not text:
         return b""
-    
+
     # Map language to Sarvam language code
     lang_code = "hi-IN"
     if language == "english":
         lang_code = "en-IN"
     elif language in ("hinglish", "hindi", "rajasthani"):
         lang_code = "hi-IN"
-    
+
     try:
         return _sarvam_tts(text, lang_code)
     except Exception as e:
-        print(f"[Voice] Sarvam TTS failed: {e}")
+        log.warning("Sarvam TTS failed: %s", e)
         return b""
 
 

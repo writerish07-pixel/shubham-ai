@@ -11,31 +11,53 @@ KEY DESIGN NOTES:
 - Always have a <Say> fallback in case Sarvam TTS is slow/unavailable.
 """
 
-import os, json, re, io, asyncio
-from pathlib import Path
-from datetime import datetime
+import asyncio
+import io
+import logging
+import os
+import re
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import requests as _requests
-from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import config
 import sheets_manager as db
 from call_handler import (
-    start_call_session, get_opening_audio,
-    end_call_session, active_calls
+    active_calls,
+    end_call_session,
+    get_opening_audio,
+    start_call_session,
 )
-from lead_manager import process_call_result, add_leads_from_import, get_dashboard_stats
 from exotel_client import make_outbound_call
-from scraper import parse_offer_file, scrape_hero_website
+from lead_manager import add_leads_from_import, get_dashboard_stats
 from scheduler import start_scheduler, stop_scheduler
+from scraper import parse_offer_file, scrape_hero_website
 from voice import synthesize_speech, transcribe_audio
 
-# ── App setup ──────────────────────────────────────────────────────────────────
-app = FastAPI(title="Shubham Motors AI Agent", version="2.1.0")
+# -- Logging ------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("shubham-ai")
+
+# -- App setup ----------------------------------------------------------------
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -44,27 +66,37 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 _executor = ThreadPoolExecutor(max_workers=12)
 
 
-# ── STARTUP / SHUTDOWN ─────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Modern FastAPI lifespan handler (replaces deprecated on_event)."""
+    # -- Startup ---------------------------------------------------------------
+    log.info("=" * 60)
+    log.info("  SHUBHAM MOTORS AI AGENT -- STARTING UP")
+    log.info("  %s, %s", config.BUSINESS_NAME, config.BUSINESS_CITY)
+    log.info("  Public URL: %s", config.PUBLIC_URL)
+    log.info("  Exophone: %s", config.EXOTEL_PHONE_NUMBER)
+    log.info("=" * 60)
 
-@app.on_event("startup")
-async def startup():
-    print(f"\n{'='*60}")
-    print(f"  SHUBHAM MOTORS AI AGENT — STARTING UP")
-    print(f"  {config.BUSINESS_NAME}, {config.BUSINESS_CITY}")
-    print(f"  Public URL: {config.PUBLIC_URL}")
-    print(f"  Exophone: {config.EXOTEL_PHONE_NUMBER}")
-    print(f"{'='*60}\n")
+    # Validate configuration
+    for warning in config.validate_config():
+        log.warning("CONFIG: %s", warning)
+
     try:
         scrape_hero_website()
-        print("Hero bike catalog loaded")
+        log.info("Hero bike catalog loaded")
     except Exception as e:
-        print(f"Catalog load failed: {e} (using fallback data)")
+        log.warning("Catalog load failed: %s (using fallback data)", e)
     start_scheduler()
 
+    yield  # app is running
 
-@app.on_event("shutdown")
-async def shutdown():
+    # -- Shutdown --------------------------------------------------------------
     stop_scheduler()
+    _executor.shutdown(wait=False)
+    log.info("Shubham Motors AI Agent shut down.")
+
+
+app = FastAPI(title="Shubham Motors AI Agent", version="2.2.0", lifespan=lifespan)
 
 
 # ── HEALTH ─────────────────────────────────────────────────────────────────────
@@ -139,10 +171,10 @@ def _download_recording(url: str) -> bytes:
             timeout=15
         )
         r.raise_for_status()
-        print(f"[Audio] Downloaded {len(r.content)} bytes from Exotel recording")
+        log.info("Downloaded %d bytes from Exotel recording", len(r.content))
         return r.content
     except Exception as e:
-        print(f"[Audio] Download failed: {e}")
+        log.warning("Recording download failed: %s", e)
         return b""
 
 
@@ -159,10 +191,10 @@ async def _run(fn, *args, timeout: float = 12.0):
             timeout=timeout
         )
     except asyncio.TimeoutError:
-        print(f"[Async] Timeout ({timeout}s) in {getattr(fn, '__name__', str(fn))}")
+        log.warning("Timeout (%ss) in %s", timeout, getattr(fn, '__name__', str(fn)))
         return None
     except Exception as e:
-        print(f"[Async] Error in {getattr(fn, '__name__', str(fn))}: {e}")
+        log.warning("Error in %s: %s", getattr(fn, '__name__', str(fn)), e)
         return None
 
 
@@ -180,7 +212,7 @@ async def incoming_call(request: Request):
     call_sid = form.get("CallSid", "").strip()
     caller   = form.get("From", "").strip()
 
-    print(f"\n[Incoming] Call from {caller} | SID: {call_sid}")
+    log.info("[Incoming] Call from %s | SID: %s", caller, call_sid)
 
     if not call_sid:
         return Response(content=_hangup_xml(), media_type="application/xml")
@@ -197,9 +229,9 @@ async def incoming_call(request: Request):
             opening_path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
             opening_path.write_bytes(opening_audio)
             opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
-            print(f"[Incoming] Custom greeting ready for {call_sid}")
+            log.info("[Incoming] Custom greeting ready for %s", call_sid)
     except Exception as e:
-        print(f"[Incoming] Greeting gen error for {call_sid}: {e}")
+        log.warning("[Incoming] Greeting gen error for %s: %s", call_sid, e)
 
     if opening_url:
         return Response(
@@ -213,7 +245,7 @@ async def incoming_call(request: Request):
             "Aapka call receive karke bahut khushi hui! "
             "Kaise help kar sakti hoon aapki? Koi Hero bike mein interest hai aapko?"
         )
-        print(f"[Incoming] Using Say fallback for {call_sid}")
+        log.info("[Incoming] Using Say fallback for %s", call_sid)
         return Response(
             content=_record_xml(call_sid, say_text=greeting),
             media_type="application/xml"
@@ -231,7 +263,7 @@ async def outbound_call_handler(request: Request):
     called   = form.get("To", "").strip()
     lead_id  = form.get("CustomField", "").strip()
 
-    print(f"\n[Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
+    log.info("[Outbound] Call to %s | SID: %s | Lead: %s", called, call_sid, lead_id)
 
     if not call_sid:
         return Response(content=_hangup_xml(), media_type="application/xml")
@@ -240,7 +272,7 @@ async def outbound_call_handler(request: Request):
     if call_sid not in active_calls:
         start_call_session(call_sid, called, lead_id=lead_id)
     else:
-        print(f"[Outbound] Session already exists for {call_sid}, skipping duplicate init")
+        log.info("[Outbound] Session already exists for %s, skipping duplicate init", call_sid)
 
     opening_url = None
     try:
@@ -250,7 +282,7 @@ async def outbound_call_handler(request: Request):
             opening_path.write_bytes(opening_audio)
             opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
     except Exception as e:
-        print(f"[Outbound] Greeting gen error: {e}")
+        log.warning("[Outbound] Greeting gen error: %s", e)
 
     if opening_url:
         return Response(
@@ -287,13 +319,15 @@ async def handle_gather(call_sid: str, request: Request):
     speech_result = form.get("SpeechResult", "").strip()
     digits        = form.get("Digits", "").strip()
 
-    print(f"[Gather] [{call_sid}] RecordingUrl={bool(recording_url)} "
-          f"SpeechResult='{speech_result[:60]}' Digits='{digits}'")
+    log.info(
+        "[Gather] [%s] RecordingUrl=%s SpeechResult='%s' Digits='%s'",
+        call_sid, bool(recording_url), speech_result[:60], digits,
+    )
 
     # ── Get active session ────────────────────────────────────────────────────
     session = active_calls.get(call_sid)
     if not session:
-        print(f"[Gather] [{call_sid}] No session found — hanging up")
+        log.warning("[Gather] [%s] No session found -- hanging up", call_sid)
         return Response(content=_hangup_xml(), media_type="application/xml")
 
     # ── Transcribe customer input ─────────────────────────────────────────────
@@ -309,7 +343,7 @@ async def handle_gather(call_sid: str, request: Request):
             if stt_result:
                 customer_input = stt_result.get("text", "").strip()
                 detected_lang  = stt_result.get("language", "hinglish")
-                print(f"[Gather] [{call_sid}] STT: '{customer_input[:120]}' ({detected_lang})")
+                log.info("[Gather] [%s] STT: '%s' (%s)", call_sid, customer_input[:120], detected_lang)
                 if customer_input:
                     session["language"] = detected_lang
 
@@ -317,10 +351,10 @@ async def handle_gather(call_sid: str, request: Request):
     if not customer_input:
         silence_count = session.get("silence_count", 0) + 1
         session["silence_count"] = silence_count
-        print(f"[Gather] [{call_sid}] Silence #{silence_count}")
+        log.info("[Gather] [%s] Silence #%d", call_sid, silence_count)
 
         if silence_count >= 3:
-            print(f"[Gather] [{call_sid}] 3 silences — hanging up")
+            log.info("[Gather] [%s] 3 silences -- hanging up", call_sid)
             return Response(content=_hangup_xml(), media_type="application/xml")
 
         retry_text = "Ji? Kuch clearly suna nahi — kya aap thoda louder bol sakte hain?"
@@ -333,7 +367,7 @@ async def handle_gather(call_sid: str, request: Request):
     session["silence_count"] = 0
     session["turn_count"] = session.get("turn_count", 0) + 1
 
-    print(f"[Gather] [{call_sid}] Customer (turn {session['turn_count']}): '{customer_input[:120]}'")
+    log.info("[Gather] [%s] Customer (turn %d): '%s'", call_sid, session['turn_count'], customer_input[:120])
 
     # ── Get AI response via Groq LLM ─────────────────────────────────────────
     conv = session["conversation"]
@@ -347,7 +381,7 @@ async def handle_gather(call_sid: str, request: Request):
     if not voice_text:
         voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
 
-    print(f"[Gather] [{call_sid}] Priya: {voice_text[:120]}")
+    log.info("[Gather] [%s] Priya: %s", call_sid, voice_text[:120])
 
     # ── Detect language for TTS routing ──────────────────────────────────────
     devanagari_count = sum(1 for c in customer_input if '\u0900' <= c <= '\u097F')
@@ -373,7 +407,7 @@ async def handle_gather(call_sid: str, request: Request):
         )
     else:
         # Fallback: Exotel's built-in TTS (zero latency, lower quality)
-        print(f"[Gather] [{call_sid}] TTS unavailable — using Say fallback")
+        log.info("[Gather] [%s] TTS unavailable -- using Say fallback", call_sid)
         return Response(
             content=_record_xml(call_sid, say_text=voice_text),
             media_type="application/xml"
@@ -389,9 +423,12 @@ async def call_status(request: Request, background_tasks: BackgroundTasks):
     form = await request.form()
     call_sid = form.get("CallSid", "")
     status   = form.get("Status", "")
-    duration = int(form.get("Duration", 0))
+    try:
+        duration = int(form.get("Duration") or 0)
+    except (ValueError, TypeError):
+        duration = 0
 
-    print(f"\n[Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
+    log.info("[Status] Call %s ended | Status: %s | Duration: %ds", call_sid, status, duration)
 
     # Process in background — don't make Exotel wait
     background_tasks.add_task(end_call_session, call_sid, duration)
@@ -457,7 +494,8 @@ async def api_add_lead(request: Request):
 @app.post("/api/leads/import")
 async def import_leads(file: UploadFile = File(...)):
     content = await file.read()
-    ext = Path(file.filename).suffix.lower()
+    fname = file.filename or "upload.xlsx"
+    ext = Path(fname).suffix.lower()
     try:
         df = pd.read_csv(io.BytesIO(content)) if ext == ".csv" else pd.read_excel(io.BytesIO(content))
         df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
@@ -497,7 +535,8 @@ async def upload_offer(
     models: str = Form(""),
 ):
     content  = await file.read()
-    filepath = UPLOAD_DIR / file.filename
+    fname = file.filename or "offer_upload"
+    filepath = UPLOAD_DIR / fname
     filepath.write_bytes(content)
     offer_text = parse_offer_file(str(filepath))
     offer_id   = db.add_offer({

@@ -2,14 +2,17 @@
 lead_manager.py
 Business logic: post-call processing, lead scoring, salesperson assignment.
 """
+import logging
 from datetime import datetime, timedelta
-import itertools
+
 import config
 import sheets_manager as db
 from exotel_client import notify_salesperson
 
-# Round-robin assignment tracker
-_assignment_counter = itertools.cycle(range(len(config.SALES_TEAM)))
+log = logging.getLogger("shubham-ai.leads")
+
+# Round-robin assignment index (safe even when SALES_TEAM is empty)
+_assignment_index = 0
 
 
 def process_call_result(lead_id: str, analysis: dict, transcript: str, duration_sec: int, direction: str = "outbound"):
@@ -22,6 +25,10 @@ def process_call_result(lead_id: str, analysis: dict, transcript: str, duration_
     """
     lead = db.get_lead_by_id(lead_id) if lead_id else None
     mobile = lead.get("mobile", "") if lead else ""
+
+    if not analysis:
+        log.warning("No analysis data for lead %s, using defaults", lead_id)
+        analysis = {"temperature": "warm", "next_action": "followup_call", "notes": "Analysis unavailable"}
     
     # ── Map analysis → lead updates ──────────────────────────────────────────
     updates = {}
@@ -80,7 +87,10 @@ def process_call_result(lead_id: str, analysis: dict, transcript: str, duration_
     
     # ── Assign salesperson if hot/converted ───────────────────────────────────
     if analysis.get("assign_to_salesperson") or updates.get("status") in ("converted", "hot"):
-        _assign_salesperson(lead_id, lead, updates)
+        try:
+            _assign_salesperson(lead_id, lead, updates)
+        except Exception as exc:
+            log.error("Salesperson assignment failed for lead %s: %s", lead_id, exc)
 
 
 def _compute_followup(analysis: dict, hours_default: int = 24) -> str:
@@ -107,20 +117,23 @@ def _compute_followup(analysis: dict, hours_default: int = 24) -> str:
 
 def _assign_salesperson(lead_id: str, lead: dict, updates: dict):
     """Round-robin assign salesperson and notify via SMS."""
+    global _assignment_index
     if not config.SALES_TEAM:
+        log.info("No sales team configured, skipping assignment for lead %s", lead_id)
         return
-    
-    sp = config.SALES_TEAM[next(_assignment_counter) % len(config.SALES_TEAM)]
-    
+
+    sp = config.SALES_TEAM[_assignment_index % len(config.SALES_TEAM)]
+    _assignment_index += 1
+
     if lead_id:
         db.update_lead(lead_id, {
             "assigned_to": sp["name"],
             "assigned_mobile": sp["mobile"]
         })
-    
+
     merged_lead = {**(lead or {}), **updates, "lead_id": lead_id}
     notify_salesperson(sp, merged_lead)
-    print(f"[LeadManager] Lead {lead_id} assigned to {sp['name']} ({sp['mobile']})")
+    log.info("Lead %s assigned to %s (%s)", lead_id, sp['name'], sp['mobile'])
 
 
 def add_leads_from_import(leads_list: list) -> list:
@@ -131,7 +144,7 @@ def add_leads_from_import(leads_list: list) -> list:
             continue
         existing = db.get_lead_by_mobile(lead["mobile"])
         if existing:
-            print(f"[LeadManager] Lead with mobile {lead['mobile']} already exists, skipping")
+            log.info("Lead with mobile %s already exists, skipping", lead.get("mobile", "?"))
             continue
         lid = db.add_lead(lead)
         ids.append(lid)
