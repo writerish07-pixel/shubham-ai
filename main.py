@@ -350,7 +350,7 @@ async def _transfer_to_hot_agent(call_sid: str, session: dict, lead_data: dict):
     print(f"[HOT] Customer: {customer_name} | Model: {interested_model} | Budget: {budget}")
     
     # First, tell customer an agent will take the call
-    inform_text = "Ji! Aap bahut interested lag rahe hain! Ek min, aapko humare experienced agent se connect karwati hain. Woh aapko best deal dilayenge!"
+    inform_text = "Ji! Aap interested lag rahe hain! Ek min, aapako booking aur billing poocess ke lie hamaare sales agent se sampark karati hoon.!"
     
     # Generate TTS for the announcement
     ai_audio = await _run(synthesize_speech, inform_text, "hinglish", timeout=12.0)

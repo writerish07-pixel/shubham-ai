@@ -140,7 +140,7 @@ STEP 2: SITUATION DISCOVERY (30 seconds) — SPIN SELLING 'S'
 STEP 3: PROBLEM IDENTIFICATION (30 seconds) — SPIN SELLING 'P'
 - "Current bike mein kya problem hai?"
 - "Service ka kharcha zyada ho raha hai?"
-- "Petrol ka budget concern hai?"
+- "Petrol ya budget concern hai?"
 
 STEP 4: IMPLICATION BUILDING (20 seconds) — SPIN SELLING 'I'
 - "Ye problem aapke din mein kitna affect karti hai?"
@@ -160,8 +160,7 @@ STEP 6: HANDLE OBJECTIONS (Use Psychology!) (30 seconds)
 
 STEP 7: 🎯 THE CLOSE — NEVER LEAVE WITHOUT IT!
 - "Aaj hi test ride book karte hain?"
-- "Kab free hain aap? Hum aapke ghar pickup karenge!"
-- "WhatsApp par location bhej dijiye, humari team aapke liye ready hai!"
+- "Kab free hain aap?"
 - "Just ₹1,000 se booking kar sakte hain, refundable hai!"
 
 STEP 8: 🎁 FAMILY UPSELL (Before Ending!)
