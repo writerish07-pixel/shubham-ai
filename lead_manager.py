@@ -48,6 +48,22 @@ def process_call_result(lead_id: str, analysis: dict, transcript: str, duration_
     if analysis.get("notes"):
         updates["notes"] = analysis["notes"]
     
+    # ── Family Profiling Updates ─────────────────────────────────────────────────
+    if analysis.get("occupation"):
+        updates["occupation"] = analysis["occupation"]
+    if analysis.get("family_members"):
+        updates["family_members"] = analysis["family_members"]
+    if analysis.get("children_ages"):
+        updates["children_ages"] = analysis["children_ages"]
+    if analysis.get("spouse_interest"):
+        updates["spouse_interest"] = analysis["spouse_interest"]
+    if analysis.get("family_upsell_note"):
+        updates["family_upsell"] = analysis["family_upsell_note"]
+    if analysis.get("age_estimate"):
+        updates["age_estimate"] = analysis["age_estimate"]
+    if analysis.get("whatsapp_number"):
+        updates["whatsapp"] = analysis["whatsapp_number"]
+    
     # ── Status transitions ────────────────────────────────────────────────────
     if temp == "dead" or outcome == "not_interested":
         updates["status"] = "dead"
