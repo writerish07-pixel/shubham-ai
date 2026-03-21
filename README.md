@@ -1,166 +1,200 @@
-# Shubham Motors AI Voice Agent
+# 🏍️ Shubham Motors AI Voice Agent
 
-An AI-powered outbound calling bot for **Shubham Motors** (Hero MotoCorp dealership, Jaipur). The system makes automated phone calls, conducts AI voice conversations in Hindi/Hinglish, scores leads, and manages follow-ups.
+An AI-powered voice calling agent for **Shubham Motors**, a Hero MotoCorp authorized dealership in Jaipur, Rajasthan. This system replaces human telecallers with an intelligent AI agent that handles both inbound and outbound calls, manages leads, schedules follow-ups, and improves conversion rates.
 
-## Architecture
+## 🌟 Features
+
+- **AI Voice Conversations**: Natural Hinglish conversations using Groq LLM + Sarvam AI TTS/STT
+- **Lead Management**: Auto-capture, scoring, and classification (Hot/Warm/Cold/Dead)
+- **Automated Follow-ups**: Scheduled calls based on lead status and engagement
+- **Sales Intelligence**: Dynamic pitch adjustment based on customer responses
+- **Dashboard**: Real-time stats and lead management via web UI
+- **Multi-channel Support**: Exotel telephony integration with webhook-based call handling
+- **Offer Management**: Upload and parse PDF/Excel offers automatically
+
+## 🏗️ Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Exotel     │────▶│  FastAPI      │────▶│  Groq LLM    │
-│  Telephony   │◀────│  (main.py)    │◀────│  (llama-3.3) │
-└──────────────┘     └──────┬───────┘     └──────────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-       ┌───────────┐ ┌──────────┐ ┌──────────┐
-       │ Sarvam AI │ │ Deepgram │ │  JSON DB │
-       │ TTS + STT │ │ STT      │ │ (data/)  │
-       └───────────┘ └──────────┘ └──────────┘
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Exotel        │────▶│   FastAPI       │────▶│   Groq LLM      │
+│   (Telephony)   │     │   Server        │     │   (AI Brain)   │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                               │                        │
+                               ▼                        ▼
+                        ┌─────────────────┐     ┌─────────────────┐
+                        │   Sarvam AI     │     │   Lead Manager  │
+                        │   (TTS/STT)     │     │   & Scheduler   │
+                        └─────────────────┘     └─────────────────┘
 ```
 
-### Key Components
+## 🚀 Quick Start
 
-| File | Purpose |
-|---|---|
-| `main.py` | FastAPI server, Exotel webhooks, API endpoints, dashboard |
-| `agent.py` | AI conversation manager (Groq LLM with system prompts) |
-| `call_handler.py` | Call session lifecycle (start, process, end) |
-| `voice.py` | Speech-to-text (Sarvam/Deepgram) and text-to-speech (Sarvam) |
-| `lead_manager.py` | Lead scoring, follow-up scheduling, salesperson assignment |
-| `sheets_manager.py` | Thread-safe JSON storage for leads, calls, offers |
-| `exotel_client.py` | Exotel API client with retry logic |
-| `scheduler.py` | APScheduler for automated follow-ups and morning calls |
-| `scraper.py` | Hero MotoCorp website scraper for bike catalog |
-| `config.py` | Configuration loader with validation |
-
-## Prerequisites
+### Prerequisites
 
 - Python 3.10+
-- [Exotel](https://exotel.com/) account with API credentials
-- [Groq](https://groq.com/) API key
-- [Sarvam AI](https://www.sarvam.ai/) API key (for Hindi TTS/STT)
-- [Deepgram](https://deepgram.com/) API key (STT fallback)
-- [ngrok](https://ngrok.com/) for local development (Exotel webhooks need a public URL)
+- Exotel account (API Key, Token, Account SID)
+- Groq API key (for LLM)
+- Sarvam AI API key (for TTS/STT)
+- Deepgram API key (optional, for STT fallback)
 
-## Quick Start
+### Installation
 
-### 1. Clone and install dependencies
-
-```bash
-git clone https://github.com/writerish07-pixel/shubham-ai.git
-cd shubham-ai
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-pip install -r requirements.txt
-```
-
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env with your actual API keys and configuration
-```
-
-### 3. Start ngrok (for Exotel webhooks)
-
-```bash
-ngrok http 5000
-# Copy the https URL and set it as PUBLIC_URL in .env
-```
-
-### 4. Run the server
-
-```bash
-python main.py
-# Server starts on http://localhost:5000
-```
-
-### 5. Configure Exotel webhooks
-
-In your Exotel dashboard, set these webhook URLs:
-- **Incoming call**: `https://your-ngrok-url/call/incoming`
-- **Outbound call**: `https://your-ngrok-url/call/outbound`
-- **Call status**: `https://your-ngrok-url/call/status`
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/` | Dashboard (HTML) |
-| GET | `/health` | Health check |
-| POST | `/call/incoming` | Exotel incoming call webhook |
-| POST | `/call/outbound` | Exotel outbound call webhook |
-| POST | `/call/gather` | Exotel gather (speech input) webhook |
-| POST | `/call/status` | Exotel call status webhook |
-| GET | `/api/leads` | List all leads |
-| POST | `/api/leads/add` | Add a single lead |
-| POST | `/api/leads/import` | Import leads from CSV/Excel |
-| POST | `/api/call/make` | Trigger an outbound call |
-| POST | `/api/offers/upload` | Upload offer/promotion file |
-| GET | `/api/stats` | Dashboard statistics |
-| GET | `/api/active-calls` | List active call sessions |
-
-## Running Tests
-
-```bash
-pip install pytest pytest-asyncio httpx
-python -m pytest tests/ -v
-```
-
-## Project Structure
-
-```
-shubham-ai/
-├── main.py              # FastAPI application entry point
-├── agent.py             # AI conversation manager (Groq LLM)
-├── call_handler.py      # Call session management
-├── voice.py             # TTS/STT integrations
-├── lead_manager.py      # Lead scoring and follow-up logic
-├── sheets_manager.py    # Thread-safe JSON storage
-├── exotel_client.py     # Exotel API client
-├── scheduler.py         # APScheduler automated jobs
-├── scraper.py           # Hero website scraper
-├── config.py            # Configuration with validation
-├── import_template.py   # (Reserved for import templates)
-├── requirements.txt     # Python dependencies
-├── .env.example         # Environment variable template
-├── .gitignore           # Git ignore rules
-├── tests/               # Automated test suite
-│   └── test_app.py      # API, storage, lead logic tests
-├── data/                # JSON data storage (gitignored)
-│   ├── leads.json
-│   ├── calls.json
-│   └── offers.json
-└── uploads/             # Audio files (gitignored)
-```
-
-## Deployment
-
-### Production Checklist
-
-1. Set all required API keys in `.env`
-2. Set `PUBLIC_URL` to your production domain (not localhost)
-3. Use a process manager (e.g., `gunicorn`, `systemd`, or Docker)
-4. Example with gunicorn:
+1. **Clone the repository**
    ```bash
-   pip install gunicorn
-   gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:5000
+   git clone <repository-url>
+   cd shubham-motors-ai
    ```
-5. Ensure `data/` directory is persistent across deploys
-6. Configure Exotel webhooks to point to your production URL
-7. Monitor logs for any configuration warnings at startup
+
+2. **Create virtual environment**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Linux/Mac
+   # or
+   venv\Scripts\activate     # Windows
+   ```
+
+3. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configure environment**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys
+   ```
+
+5. **Run the server**
+   ```bash
+   python main.py
+   ```
+
+The server will start at `http://localhost:5000`
+
+## ⚙️ Configuration
 
 ### Environment Variables
 
-See `.env.example` for the full list of configuration options.
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `EXOTEL_API_KEY` | Exotel API Key | Yes |
+| `EXOTEL_API_TOKEN` | Exotel API Token | Yes |
+| `EXOTEL_ACCOUNT_SID` | Exotel Account SID | Yes |
+| `EXOTEL_PHONE_NUMBER` | Your Exophone number | Yes |
+| `GROQ_API_KEY` | Groq API key | Yes |
+| `SARVAM_API_KEY` | Sarvam AI API key | Yes |
+| `DEEPGRAM_API_KEY` | Deepgram API key (optional) | No |
+| `PUBLIC_URL` | Public URL for webhooks | Yes (production) |
+| `TWILIO_*` | Twilio credentials (optional backup) | No |
 
-**Required for core functionality:**
-- `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, `EXOTEL_ACCOUNT_SID`
-- `GROQ_API_KEY`
-- `SARVAM_API_KEY`
-- `PUBLIC_URL` (must be publicly accessible)
+### Business Configuration
 
-**Optional:**
-- `DEEPGRAM_API_KEY` (STT fallback)
-- `WEBSITE_URL` (Hero website for scraping; uses fallback catalog if empty)
-- `GOOGLE_SHEET_ID` (not used in current JSON-based storage)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUSINESS_NAME` | Shubham Motors | Dealership name |
+| `BUSINESS_CITY` | Jaipur | City location |
+| `WORKING_HOURS_START` | 9 | Start hour (24h) |
+| `WORKING_HOURS_END` | 19 | End hour (24h) |
+| `WORKING_DAYS` | Mon-Sat | Working days |
+| `MAX_FOLLOWUP_ATTEMPTS` | 3 | Max call attempts before marking dead |
+
+## 📡 API Endpoints
+
+### Webhooks (Exotel)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/call/incoming` | POST | Handle incoming calls |
+| `/call/handler` | POST | Outbound call handler |
+| `/call/gather/{call_sid}` | POST | Handle customer audio recording |
+| `/call/status` | POST | Call status updates |
+| `/call/audio/opening/{call_sid}` | GET | Stream opening greeting |
+| `/call/audio/response/{call_sid}` | GET | Stream AI response |
+
+### REST API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Root status |
+| `/health` | GET | Health check |
+| `/dashboard` | GET | Admin dashboard HTML |
+| `/api/leads` | GET | List all leads |
+| `/api/leads/add` | POST | Add new lead |
+| `/api/leads/import` | POST | Import leads from Excel |
+| `/api/call/make` | POST | Trigger outbound call |
+| `/api/offers/upload` | POST | Upload offer file |
+| `/api/stats` | GET | Dashboard statistics |
+
+## 🔧 Development
+
+### Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+### Project Structure
+
+```
+.
+├── main.py              # FastAPI server & webhooks
+├── agent.py             # AI conversation manager
+├── call_handler.py      # Call session management
+├── config.py            # Configuration
+├── exotel_client.py     # Exotel API client
+├── lead_manager.py      # Lead processing logic
+├── sheets_manager.py    # Local JSON storage
+├── scheduler.py         # Follow-up automation
+├── scraper.py           # Hero website scraper
+├── voice.py             # TTS/STT integration
+├── keep_alive.py        # Server ping for Render
+├── requirements.txt     # Dependencies
+├── .env.example         # Environment template
+└── tests/               # Test suite
+```
+
+## ☁️ Deployment (Render)
+
+1. Create a new Web Service on Render
+2. Connect your GitHub repository
+3. Configure environment variables in Render dashboard
+4. Set build command: `pip install -r requirements.txt`
+5. Set start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+
+### Render YAML
+
+The included `render.yaml` handles automatic deployment configuration.
+
+## 📊 Lead Scoring
+
+Leads are automatically classified:
+
+| Category | Criteria |
+|----------|----------|
+| 🔥 HOT | Ready to buy within 1 week, has budget |
+| 🟡 WARM | Interested, 2-4 weeks timeline |
+| ❄️ COLD | Vague interest, needs nurturing |
+| ☠️ DEAD | Not interested, max attempts reached |
+
+## 🔄 Automated Workflow
+
+1. **New Lead Import** → Added to queue
+2. **Morning Run (9:30 AM)** → AI calls new leads
+3. **Call Analysis** → Lead scored & categorized
+4. **Hot Leads** → Immediately assigned to salesperson
+5. **Follow-up Queue** → Scheduled calls based on next_followup time
+6. **Feedback Loop** → AI learns from successful conversions
+
+## 🔐 Security
+
+- API keys stored in environment variables
+- No sensitive data in code
+- Webhook signature verification (recommended for production)
+
+## 📝 License
+
+Private - Shubham Motors Internal Use Only
+
+## 👤 Author
+
+Built for Shubham Motors, Jaipur by AI Voice Agent Team

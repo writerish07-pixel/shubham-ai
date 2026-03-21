@@ -10,94 +10,90 @@ KEY DESIGN NOTES:
   <Record> captures customer audio → Exotel POSTs RecordingUrl → we download + STT.
 - Always have a <Say> fallback in case Sarvam TTS is slow/unavailable.
 """
-
-import asyncio
-import io
-import logging
-import os
-import re
-from concurrent.futures import ThreadPoolExecutor
+import base64
+import os, json, re, io, asyncio, time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import WebSocket, WebSocketDisconnect
 
 import pandas as pd
 import requests as _requests
-import uvicorn
-from fastapi import (
-    BackgroundTasks,
-    FastAPI,
-    File,
-    Form,
-    HTTPException,
-    Request,
-    UploadFile,
-)
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+import uvicorn
+import numpy as np 
 
 import config
 import sheets_manager as db
 from call_handler import (
-    active_calls,
-    end_call_session,
-    get_opening_audio,
-    start_call_session,
+    start_call_session, get_opening_audio,
+    end_call_session, active_calls
 )
+from agent import get_opening_message
+from lead_manager import process_call_result, add_leads_from_import, get_dashboard_stats
 from exotel_client import make_outbound_call
-from lead_manager import add_leads_from_import, get_dashboard_stats
-from scheduler import start_scheduler, stop_scheduler
 from scraper import parse_offer_file, scrape_hero_website
+from scheduler import start_scheduler, stop_scheduler
 from voice import synthesize_speech, transcribe_audio
+from keep_alive import keep_alive
 
-# -- Logging ------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger("shubham-ai")
-
-# -- App setup ----------------------------------------------------------------
+# ── App setup ──────────────────────────────────────────────────────────────────
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+_greeting_pcm_cache = {}
 
 # Thread pool for ALL blocking I/O (Sarvam TTS, Deepgram STT, Groq LLM)
 # This prevents blocking the FastAPI async event loop
 _executor = ThreadPoolExecutor(max_workers=12)
 
 
+# ── STARTUP / SHUTDOWN using modern lifespan ───────────────────────────────────
+
 @asynccontextmanager
-async def lifespan(application: FastAPI):
-    """Modern FastAPI lifespan handler (replaces deprecated on_event)."""
-    # -- Startup ---------------------------------------------------------------
-    log.info("=" * 60)
-    log.info("  SHUBHAM MOTORS AI AGENT -- STARTING UP")
-    log.info("  %s, %s", config.BUSINESS_NAME, config.BUSINESS_CITY)
-    log.info("  Public URL: %s", config.PUBLIC_URL)
-    log.info("  Exophone: %s", config.EXOTEL_PHONE_NUMBER)
-    log.info("=" * 60)
-
-    # Validate configuration
-    for warning in config.validate_config():
-        log.warning("CONFIG: %s", warning)
-
+async def lifespan(app: FastAPI):
+    """Modern lifespan context manager for startup/shutdown."""
+    # Startup
+    keep_alive()
+    print(f"\n{'='*60}")
+    print(f"  SHUBHAM MOTORS AI AGENT — STARTING UP")
+    print(f"  {config.BUSINESS_NAME}, {config.BUSINESS_CITY}")
+    print(f"  Public URL: {config.PUBLIC_URL}")
+    print(f"  Exophone: {config.EXOTEL_PHONE_NUMBER}")
+    print(f"{'='*60}\n")
     try:
         scrape_hero_website()
-        log.info("Hero bike catalog loaded")
+        print("Hero bike catalog loaded")
     except Exception as e:
-        log.warning("Catalog load failed: %s (using fallback data)", e)
+        print(f"Catalog load failed: {e} (using fallback data)")
     start_scheduler()
 
-    yield  # app is running
-
-    # -- Shutdown --------------------------------------------------------------
+    async def _prewarm():
+        await asyncio.sleep(3)  # let server fully start first
+        from agent import get_opening_message
+        text = get_opening_message(None, is_inbound=True)
+        audio = await _run(synthesize_speech, text, "hinglish", timeout=15.0)
+        if audio:
+            pcm = await _run(_mp3_to_pcm, audio, timeout=5.0)
+            if pcm:
+                _greeting_pcm_cache["data"] = pcm
+                print(f"[Startup] ✅ Greeting PCM cached: {len(pcm)} bytes")
+        else:
+            print("[Startup] ⚠️ Greeting prewarm failed")
+    
+    asyncio.create_task(_prewarm())
+    
+    yield  # Application runs here
+    
+    # Shutdown
+    print("\n[Shutdown] Stopping scheduler...")
     stop_scheduler()
-    _executor.shutdown(wait=False)
-    log.info("Shubham Motors AI Agent shut down.")
+    print("[Shutdown] Done")
 
 
-app = FastAPI(title="Shubham Motors AI Agent", version="2.2.0", lifespan=lifespan)
-
+app = FastAPI(title="Shubham Motors AI Agent", version="2.1.0", lifespan=lifespan)
 
 # ── HEALTH ─────────────────────────────────────────────────────────────────────
 
@@ -117,6 +113,12 @@ async def health():
 
 # ── HELPER FUNCTIONS ───────────────────────────────────────────────────────────
 
+def _is_silence(pcm: bytes, threshold: int = 200) -> bool:
+    samples = np.frombuffer(pcm, dtype=np.int16)
+    rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+    print(f"[VAD] RMS: {rms:.0f}")
+    return rms < threshold
+
 def _hangup_xml() -> str:
     return '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>'
 
@@ -133,31 +135,44 @@ def _xml_safe(text: str) -> str:
 
 def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> str:
     """
-    Return ExoML that optionally plays audio (or says text), then records customer's reply.
-
-    IMPORTANT: Uses <Record> — NOT <Gather input="speech">.
-    <Gather input="speech"> is Twilio TwiML and NOT supported by Exotel ExoML.
-    <Record> is the correct Exotel verb: it records audio and POSTs RecordingUrl
-    to the action webhook, which we then download and transcribe ourselves.
+    Return ExoML that plays audio then records customer's reply.
+    Uses Sarvam TTS audio via <Play>.
     """
+
+    # If text is provided but no audio URL, generate audio endpoint
+    # if not play_url and say_text:
+    #     play_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}?text={_xml_safe(say_text[:800])}"
+
+    # content = ""
+    # if play_url:
+    #     content = f"<Play>{play_url}</Play>"
+
     content = ""
     if play_url:
-        content = f"  <Play>{play_url}</Play>"
+        content = f"<Play>{play_url}</Play>"
     elif say_text:
-        content = f'  <Say language="hi-IN" voice="female">{_xml_safe(say_text[:800])}</Say>'
+        content = f'<Say language="hi-IN" voice="woman">{_xml_safe(say_text)}</Say>'
 
+#     return f"""<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#   {content}
+#   <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+#           method="POST"
+#           maxLength="30"
+#           timeout="10"
+#           playBeep="false"
+#           finishOnKey="#" />
+# </Response>"""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
 {content}
-  <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
-          method="POST"
-          maxLength="15"
-          timeout="5"
-          playBeep="false"
-          finishOnKey="#">
-  </Record>
+<Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+        method="POST"
+        maxLength="60"
+        timeout="10"
+        playBeep="false"
+        finishOnKey="#" />
 </Response>"""
-
 
 def _download_recording(url: str) -> bytes:
     """
@@ -171,11 +186,25 @@ def _download_recording(url: str) -> bytes:
             timeout=15
         )
         r.raise_for_status()
-        log.info("Downloaded %d bytes from Exotel recording", len(r.content))
+        print(f"[Audio] Downloaded {len(r.content)} bytes from Exotel recording")
         return r.content
     except Exception as e:
-        log.warning("Recording download failed: %s", e)
+        print(f"[Audio] Download failed: {e}")
         return b""
+
+# def _download_recording(url: str) -> bytes:
+#     try:
+#         r = _requests.get(
+#             url,
+#             auth=(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN),
+#             timeout=15
+#         )
+#         r.raise_for_status()
+#         print(f"[Audio] Downloaded {len(r.content)} bytes from Twilio recording")
+#         return r.content
+#     except Exception as e:
+#         print(f"[Audio] Download failed: {e}")
+#         return b""
 
 
 async def _run(fn, *args, timeout: float = 12.0):
@@ -191,66 +220,93 @@ async def _run(fn, *args, timeout: float = 12.0):
             timeout=timeout
         )
     except asyncio.TimeoutError:
-        log.warning("Timeout (%ss) in %s", timeout, getattr(fn, '__name__', str(fn)))
+        print(f"[Async] Timeout ({timeout}s) in {getattr(fn, '__name__', str(fn))}")
         return None
     except Exception as e:
-        log.warning("Error in %s: %s", getattr(fn, '__name__', str(fn)), e)
+        print(f"[Async] Error in {getattr(fn, '__name__', str(fn))}: {e}")
         return None
 
 
 # ── EXOTEL WEBHOOKS ────────────────────────────────────────────────────────────
+# @app.api_route("/call/incoming", methods=["GET", "POST"])
+# async def incoming_call(request: Request, background_tasks: BackgroundTasks):
+#     if request.method == "GET":
+#         data = request.query_params
+#     else:
+#         data = await request.form()
+
+#     call_sid = data.get("CallSid", "").strip()
+#     caller   = data.get("From", "").strip()
+
+#     print(f"\n[Incoming] Call from {caller} | SID: {call_sid}")
+
+#     if not call_sid:
+#         return Response(
+#             content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+#             media_type="application/xml"
+#         )
+
+#     start_call_session(call_sid, caller)
+
+#     # Generate warmup in background for next call
+#     warmup = UPLOAD_DIR / "opening_warmup.mp3"
+#     call_audio = UPLOAD_DIR / f"opening_{call_sid}.mp3"
+#     if not warmup.exists():
+#         async def _gen_warmup():
+#             audio = await _run(get_opening_audio, call_sid, timeout=10.0)
+#             if audio:
+#                 call_audio.write_bytes(audio)
+#                 warmup.write_bytes(audio)
+#                 print(f"[Incoming] ✅ Warmup generated: {len(audio)} bytes")
+#         background_tasks.add_task(_gen_warmup)
+
+#     greeting = "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. Aap ka call receive karke bahut khushi hui! Kaise madad kar sakti hoon aapki?"
+#     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+# <Response>
+#   <Say>{_xml_safe(greeting)}</Say>
+#   <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+#           method="POST"
+#           maxLength="60"
+#           timeout="10"
+#           playBeep="false"
+#           finishOnKey="#" />
+# </Response>"""
+
+#     return Response(content=xml, media_type="application/xml")
 
 @app.api_route("/call/incoming", methods=["GET", "POST"])
-async def incoming_call(request: Request):
-    """
-    Exotel hits this when someone calls your Exophone number.
-    MUST respond within 8-10 seconds or Exotel disconnects the call.
+async def incoming_call(request: Request, background_tasks: BackgroundTasks):
+    if request.method == "GET":
+        data = request.query_params
+    else:
+        data = await request.form()
 
-    Flow: Start session → generate greeting audio (async, 8s timeout) → return ExoML <Record>
-    """
-    form = await request.form()
-    call_sid = form.get("CallSid", "").strip()
-    caller   = form.get("From", "").strip()
+    call_sid = data.get("CallSid", "").strip()
+    caller   = data.get("From", "").strip()
 
-    log.info("[Incoming] Call from %s | SID: %s", caller, call_sid)
+    print(f"\n[Incoming] Call from {caller} | SID: {call_sid}")
 
     if not call_sid:
-        return Response(content=_hangup_xml(), media_type="application/xml")
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            media_type="application/xml"
+        )
 
-    # Start session — fast (only JSON file reads/writes)
     start_call_session(call_sid, caller)
 
-    # Generate personalized greeting audio — async with 8s timeout
-    # Falls back to Exotel <Say> (built-in TTS) if Sarvam is slow
-    opening_url = None
-    try:
-        opening_audio = await _run(get_opening_audio, call_sid, timeout=8.0)
-        if opening_audio:
-            opening_path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
-            opening_path.write_bytes(opening_audio)
-            opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
-            log.info("[Incoming] Custom greeting ready for %s", call_sid)
-    except Exception as e:
-        log.warning("[Incoming] Greeting gen error for %s: %s", call_sid, e)
+    greeting = "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. Aap ka call receive karke bahut khushi hui! Kaise madad kar sakti hoon aapki?"
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say language="hi-IN">{_xml_safe(greeting)}</Say>
+  <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+          method="POST"
+          maxLength="60"
+          timeout="10"
+          playBeep="false"
+          finishOnKey="#" />
+</Response>"""
 
-    if opening_url:
-        return Response(
-            content=_record_xml(call_sid, play_url=opening_url),
-            media_type="application/xml"
-        )
-    else:
-        # Fallback: Exotel's built-in Hindi TTS — zero latency
-        greeting = (
-            "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. "
-            "Aapka call receive karke bahut khushi hui! "
-            "Kaise help kar sakti hoon aapki? Koi Hero bike mein interest hai aapko?"
-        )
-        log.info("[Incoming] Using Say fallback for %s", call_sid)
-        return Response(
-            content=_record_xml(call_sid, say_text=greeting),
-            media_type="application/xml"
-        )
-
+    return Response(content=xml, media_type="application/xml")
 
 @app.api_route("/call/handler", methods=["GET", "POST"])
 async def outbound_call_handler(request: Request):
@@ -263,7 +319,7 @@ async def outbound_call_handler(request: Request):
     called   = form.get("To", "").strip()
     lead_id  = form.get("CustomField", "").strip()
 
-    log.info("[Outbound] Call to %s | SID: %s | Lead: %s", called, call_sid, lead_id)
+    print(f"\n[Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
 
     if not call_sid:
         return Response(content=_hangup_xml(), media_type="application/xml")
@@ -272,7 +328,7 @@ async def outbound_call_handler(request: Request):
     if call_sid not in active_calls:
         start_call_session(call_sid, called, lead_id=lead_id)
     else:
-        log.info("[Outbound] Session already exists for %s, skipping duplicate init", call_sid)
+        print(f"[Outbound] Session already exists for {call_sid}, skipping duplicate init")
 
     opening_url = None
     try:
@@ -282,7 +338,7 @@ async def outbound_call_handler(request: Request):
             opening_path.write_bytes(opening_audio)
             opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
     except Exception as e:
-        log.warning("[Outbound] Greeting gen error: %s", e)
+        print(f"[Outbound] Greeting gen error: {e}")
 
     if opening_url:
         return Response(
@@ -312,105 +368,130 @@ async def handle_gather(call_sid: str, request: Request):
     We download the recording → STT (Deepgram/Sarvam) → Groq LLM → TTS → return ExoML.
     All heavy operations run async in ThreadPoolExecutor with timeouts.
     """
-    form = await request.form()
+    try:
+        form = await request.form()
 
-    # <Record> sends RecordingUrl; <Gather> sends SpeechResult/Digits
-    recording_url = form.get("RecordingUrl", "").strip()
-    speech_result = form.get("SpeechResult", "").strip()
-    digits        = form.get("Digits", "").strip()
+        # <Record> sends RecordingUrl; <Gather> sends SpeechResult/Digits
+        recording_url = form.get("RecordingUrl", "").strip()
+        speech_result = form.get("SpeechResult", "").strip()
+        digits = form.get("Digits", "").strip()
 
-    log.info(
-        "[Gather] [%s] RecordingUrl=%s SpeechResult='%s' Digits='%s'",
-        call_sid, bool(recording_url), speech_result[:60], digits,
-    )
+        print(
+            f"[Gather] [{call_sid}] RecordingUrl={bool(recording_url)} "
+            f"SpeechResult='{speech_result[:60]}' Digits='{digits}'"
+        )
 
-    # ── Get active session ────────────────────────────────────────────────────
-    session = active_calls.get(call_sid)
-    if not session:
-        log.warning("[Gather] [%s] No session found -- hanging up", call_sid)
-        return Response(content=_hangup_xml(), media_type="application/xml")
-
-    # ── Transcribe customer input ─────────────────────────────────────────────
-    customer_input = speech_result or digits
-
-    if not customer_input and recording_url:
-        # Download recording from Exotel (requires auth)
-        audio_bytes = await _run(_download_recording, recording_url, timeout=12.0)
-
-        if audio_bytes:
-            # Transcribe with Sarvam/Deepgram
-            stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=10.0)
-            if stt_result:
-                customer_input = stt_result.get("text", "").strip()
-                detected_lang  = stt_result.get("language", "hinglish")
-                log.info("[Gather] [%s] STT: '%s' (%s)", call_sid, customer_input[:120], detected_lang)
-                if customer_input:
-                    session["language"] = detected_lang
-
-    # ── Handle silence / empty input ──────────────────────────────────────────
-    if not customer_input:
-        silence_count = session.get("silence_count", 0) + 1
-        session["silence_count"] = silence_count
-        log.info("[Gather] [%s] Silence #%d", call_sid, silence_count)
-
-        if silence_count >= 3:
-            log.info("[Gather] [%s] 3 silences -- hanging up", call_sid)
+        # ── Get active session ─────────────────────────────────────────
+        session = active_calls.get(call_sid)
+        if not session:
+            print(f"[Gather] [{call_sid}] No session found — hanging up")
             return Response(content=_hangup_xml(), media_type="application/xml")
 
-        retry_text = "Ji? Kuch clearly suna nahi — kya aap thoda louder bol sakte hain?"
-        return Response(
-            content=_record_xml(call_sid, say_text=retry_text),
-            media_type="application/xml"
+        # ── Transcribe customer input ──────────────────────────────────
+        customer_input = speech_result or digits
+
+        if not customer_input and recording_url:
+            # Download recording from Exotel (requires auth)
+            audio_bytes = await _run(_download_recording, recording_url, timeout=12.0)
+
+            if audio_bytes:
+                # Transcribe with Sarvam/Deepgram
+                stt_result = await _run(transcribe_audio, audio_bytes, "hi-IN", timeout=10.0)
+                if stt_result:
+                    customer_input = stt_result.get("text", "").strip()
+                    detected_lang = stt_result.get("language", "hinglish")
+
+                    print(
+                        f"[Gather] [{call_sid}] STT: '{customer_input[:120]}' "
+                        f"({detected_lang})"
+                    )
+
+                    if customer_input:
+                        session["language"] = detected_lang
+
+        # ── Handle silence / empty input ───────────────────────────────
+        if not customer_input:
+            silence_count = session.get("silence_count", 0) + 1
+            session["silence_count"] = silence_count
+
+            print(f"[Gather] [{call_sid}] Silence #{silence_count}")
+
+            if silence_count >= 3:
+                print(f"[Gather] [{call_sid}] 3 silences — hanging up")
+                return Response(content=_hangup_xml(), media_type="application/xml")
+
+            retry_text = "Ji? Kuch clearly suna nahi — kya aap thoda louder bol sakte hain?"
+
+            return Response(
+                content=_record_xml(call_sid, say_text=retry_text),
+                media_type="application/xml",
+            )
+
+        # Reset silence counter on successful speech
+        session["silence_count"] = 0
+        session["turn_count"] = session.get("turn_count", 0) + 1
+
+        print(
+            f"[Gather] [{call_sid}] Customer (turn {session['turn_count']}): "
+            f"'{customer_input[:120]}'"
         )
 
-    # Reset silence counter on successful speech
-    session["silence_count"] = 0
-    session["turn_count"] = session.get("turn_count", 0) + 1
+        # ── Get AI response via Groq LLM ───────────────────────────────
+        conv = session["conversation"]
+        voice_text = None
 
-    log.info("[Gather] [%s] Customer (turn %d): '%s'", call_sid, session['turn_count'], customer_input[:120])
+        ai_reply = await _run(conv.chat, customer_input, timeout=15.0)
 
-    # ── Get AI response via Groq LLM ─────────────────────────────────────────
-    conv = session["conversation"]
-    voice_text = None
+        if ai_reply:
+            # Strip JSON blocks
+            voice_text = re.sub(r"\{[\s\S]*?\}", "", ai_reply).strip()
 
-    ai_reply = await _run(conv.chat, customer_input, timeout=15.0)
-    if ai_reply:
-        # Strip any JSON analysis blocks from voice output
-        voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
+        if not voice_text:
+            voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
 
-    if not voice_text:
-        voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+        print(f"[Gather] [{call_sid}] Priya: {voice_text[:120]}")
 
-    log.info("[Gather] [%s] Priya: %s", call_sid, voice_text[:120])
+        # ── Detect language for TTS routing ────────────────────────────
+        devanagari_count = sum(1 for c in customer_input if "\u0900" <= c <= "\u097F")
 
-    # ── Detect language for TTS routing ──────────────────────────────────────
-    devanagari_count = sum(1 for c in customer_input if '\u0900' <= c <= '\u097F')
-    if devanagari_count > len(customer_input) * 0.3:
-        lang = "hindi"
-    else:
-        lang = session.get("language", "hinglish")
-    session["language"] = lang
+        if devanagari_count > len(customer_input) * 0.3:
+            lang = "hindi"
+        else:
+            lang = session.get("language", "hinglish")
 
-    # ── Generate TTS audio ─────────────────────────────────────────────────
-    audio_url = None
-    ai_audio = await _run(synthesize_speech, voice_text, lang, timeout=12.0)
-    if ai_audio:
-        audio_path = UPLOAD_DIR / f"response_{call_sid}.mp3"
-        audio_path.write_bytes(ai_audio)
-        audio_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}"
+        session["language"] = lang
 
-    # Return ExoML with TTS audio or fallback to Exotel Say
-    if audio_url:
+        # ── Generate TTS audio ─────────────────────────────────────────
+        audio_url = None
+
+        ai_audio = await _run(synthesize_speech, voice_text, lang, timeout=12.0)
+
+        if ai_audio:
+            audio_path = UPLOAD_DIR / f"response_{call_sid}.mp3"
+            audio_path.write_bytes(ai_audio)
+
+            audio_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}"
+
+        # ── Return response to Exotel ──────────────────────────────────
+        if audio_url:
+            return Response(
+                content=_record_xml(call_sid, play_url=audio_url),
+                media_type="application/xml",
+            )
+        else:
+            print(f"[Gather] [{call_sid}] TTS unavailable — using Say fallback")
+
+            return Response(
+                content=_record_xml(call_sid, say_text=voice_text),
+                media_type="application/xml",
+            )
+
+    except Exception as e:
+        print(f"[Gather ERROR] {e}")
+
         return Response(
-            content=_record_xml(call_sid, play_url=audio_url),
-            media_type="application/xml"
-        )
-    else:
-        # Fallback: Exotel's built-in TTS (zero latency, lower quality)
-        log.info("[Gather] [%s] TTS unavailable -- using Say fallback", call_sid)
-        return Response(
-            content=_record_xml(call_sid, say_text=voice_text),
-            media_type="application/xml"
+            content=_record_xml(call_sid, say_text="Sorry, ek technical issue ho gaya."),
+            media_type="application/xml",
         )
 
 
@@ -423,12 +504,9 @@ async def call_status(request: Request, background_tasks: BackgroundTasks):
     form = await request.form()
     call_sid = form.get("CallSid", "")
     status   = form.get("Status", "")
-    try:
-        duration = int(form.get("Duration") or 0)
-    except (ValueError, TypeError):
-        duration = 0
+    duration = int(form.get("Duration", 0))
 
-    log.info("[Status] Call %s ended | Status: %s | Duration: %ds", call_sid, status, duration)
+    print(f"\n[Status] Call {call_sid} ended | Status: {status} | Duration: {duration}s")
 
     # Process in background — don't make Exotel wait
     background_tasks.add_task(end_call_session, call_sid, duration)
@@ -447,18 +525,50 @@ async def call_status(request: Request, background_tasks: BackgroundTasks):
 
 # ── AUDIO FILE SERVING ─────────────────────────────────────────────────────────
 
+# @app.get("/call/audio/opening/{call_sid}")
+# async def serve_opening_audio(call_sid: str):
+
+#     path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
+
+#     if not path.exists():
+#         print(f"[Audio] Generating greeting for {call_sid}")
+
+#         audio = await _run(get_opening_audio, call_sid, timeout=10.0)
+
+#         if not audio:
+#             return Response(status_code=404)
+
+#         path.write_bytes(audio)
+
+#     return Response(
+#         content=path.read_bytes(),
+#         media_type="audio/mpeg"
+#     )
+
 @app.get("/call/audio/opening/{call_sid}")
 async def serve_opening_audio(call_sid: str):
-    path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
-    if not path.exists():
-        # Try to regenerate if session still active
-        audio = await _run(get_opening_audio, call_sid, timeout=10.0)
-        if audio:
-            path.write_bytes(audio)
-        else:
-            return Response(status_code=404)
-    return Response(content=path.read_bytes(), media_type="audio/mpeg")
+    print(f"[Audio] Opening requested for {call_sid}")
+    print(f"[Audio] Files in uploads: {list(UPLOAD_DIR.iterdir())}")
 
+    # Serve call-specific pre-generated file
+    path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
+    if path.exists():
+        print(f"[Audio] ✅ Serving pre-generated file")
+        return Response(content=path.read_bytes(), media_type="audio/mpeg")
+
+    # Fallback to warmup file (same greeting, generated at startup)
+    warmup = UPLOAD_DIR / "opening_warmup.mp3"
+    if warmup.exists():
+        print(f"[Audio] ✅ Serving warmup file")
+        return Response(content=warmup.read_bytes(), media_type="audio/mpeg")
+
+    # Last resort: generate on-demand
+    audio = await _run(get_opening_audio, call_sid, timeout=10.0)
+    if not audio:
+        print("[Audio] ❌ No audio returned")
+        return Response(status_code=404)
+
+    return Response(content=audio, media_type="audio/mpeg")
 
 @app.get("/call/audio/response/{call_sid}")
 async def serve_response_audio(call_sid: str):
@@ -494,8 +604,7 @@ async def api_add_lead(request: Request):
 @app.post("/api/leads/import")
 async def import_leads(file: UploadFile = File(...)):
     content = await file.read()
-    fname = file.filename or "upload.xlsx"
-    ext = Path(fname).suffix.lower()
+    ext = Path(file.filename).suffix.lower()
     try:
         df = pd.read_csv(io.BytesIO(content)) if ext == ".csv" else pd.read_excel(io.BytesIO(content))
         df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
@@ -535,8 +644,7 @@ async def upload_offer(
     models: str = Form(""),
 ):
     content  = await file.read()
-    fname = file.filename or "offer_upload"
-    filepath = UPLOAD_DIR / fname
+    filepath = UPLOAD_DIR / file.filename
     filepath.write_bytes(content)
     offer_text = parse_offer_file(str(filepath))
     offer_id   = db.add_offer({
@@ -560,6 +668,340 @@ async def api_active_calls():
         "call_sids": list(active_calls.keys())
     })
 
+async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket: WebSocket, state: dict):
+    session = active_calls.get(call_sid)
+    if not session:
+        return
+    if len(buf) < 8000:
+        print(f"[Voicebot] Buffer too small ({len(buf)} bytes), skipping")
+        return
+    if _is_silence(buf):
+        print("[Voicebot] Silence detected, skipping STT")
+        return
+    try:
+        wav_bytes = _pcm_to_wav(buf)
+        if wav_bytes:
+            # Save for inspection
+            with open("/tmp/debug_audio.wav", "wb") as f:
+                f.write(wav_bytes)
+            print(f"[Debug] Saved WAV: {len(wav_bytes)} bytes, header: {wav_bytes[:12]}")
+        if not wav_bytes:
+            print("[Voicebot] Audio conversion failed")
+            return
+        stt_result = await _run(transcribe_audio, wav_bytes, "hi-IN", timeout=10.0)
+        customer_text = stt_result.get("text", "").strip() if stt_result else ""
+        print(f"[Voicebot] STT: '{customer_text[:120]}'")
+
+        if not customer_text:
+            return
+
+        detected_lang = stt_result.get("language", "hinglish")
+        session["language"] = detected_lang
+
+        conv = session["conversation"]
+        ai_reply = await _run(conv.chat, customer_text, timeout=15.0)
+        voice_text = re.sub(r"\{.*", "", ai_reply, flags=re.DOTALL).strip() if ai_reply else ""
+        
+        if not voice_text:
+            voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+
+        print(f"[Voicebot] Priya: {voice_text[:120]}")
+
+        audio = await _run(synthesize_speech, voice_text, detected_lang, timeout=12.0)
+        if audio:
+            pcm = await _run(_mp3_to_pcm, audio, timeout=5.0)
+            if pcm:
+                b64 = base64.b64encode(pcm).decode("ascii")
+                await websocket.send_text(json.dumps({
+                    "event": "media",
+                    "stream_sid": stream_sid,
+                    "media": {"payload": b64}
+                }))
+                print(f"[Voicebot] Sent response ({len(pcm)} bytes)")
+                response_secs = len(pcm) / 16000  # 8kHz 16-bit = 16000 bytes/sec
+                state["listen_after"] = time.monotonic() + response_secs + 0.8
+                print(f"[Voicebot] Blocking input for {response_secs:.1f}s")
+
+    except Exception as e:
+        print(f"[Voicebot] _process_speech error: {e}")
+
+# ── VOICEBOT WEBSOCKET ─────────────────────────────────────────────────────────
+
+# @app.websocket("/call/stream")
+# async def voicebot_stream(websocket: WebSocket):
+#     await websocket.accept()
+#     call_sid = None
+#     stream_sid = ""
+#     audio_buffer = b""
+    
+#     print("[Voicebot] WebSocket connected")
+    
+#     try:
+#         async for message in websocket.iter_text():
+#             data = json.loads(message)
+#             event = data.get("event", "")
+            
+#             # ── Call started ───────────────────────────────────────────
+#             if event == "connected":
+#                 print("[Voicebot] Stream connected")
+            
+#             elif event == "start":
+#                 call_sid = data.get("start", {}).get("callSid", "")
+#                 stream_sid = data.get("start", {}).get("streamSid", "")
+#                 caller = data.get("start", {}).get("from", "")
+#                 print(f"[Voicebot] Call started | SID: {call_sid} | From: {caller}")
+                
+#                 start_call_session(call_sid, caller)
+                
+#                 # Send opening greeting immediately
+#                 session = active_calls.get(call_sid)
+#                 if session:
+#                     greeting = get_opening_message(session.get("lead"), is_inbound=True)
+#                     session["conversation"].history.append({
+#                         "role": "assistant", "content": greeting
+#                     })
+                    
+#                     pcm = _greeting_pcm_cache.get("data")
+
+#                     # Generate TTS audio
+#                     if not pcm:
+#                          # Cache miss — generate on the fly (first call after deploy)
+#                         audio = await _run(synthesize_speech, greeting, "hinglish", timeout=10.0)
+#                         if audio:
+#                             pcm = await _run(_mp3_to_pcm, audio, timeout=5.0)
+        
+#                     if pcm:
+#                         b64 = base64.b64encode(pcm).decode("ascii")
+#                         await websocket.send_text(json.dumps({
+#                             "event": "media",
+#                             "stream_sid": stream_sid,
+#                             "media": {"payload": b64}
+#                         }))
+#                         print(f"[Voicebot] Sent greeting ({len(pcm)} bytes, cached={bool(_greeting_pcm_cache.get('data'))})")
+            
+#             # ── Incoming audio from customer ───────────────────────────
+#             elif event == "media":
+#                 payload = data.get("media", {}).get("payload", "")
+#                 if payload:
+#                     chunk = base64.b64decode(payload)
+#                     audio_buffer += chunk
+            
+#             # ── Customer stopped speaking ──────────────────────────────
+#             elif event == "stop":
+#                 print(f"[Voicebot] Stream stopped | SID: {call_sid}")
+#                 if call_sid:
+#                     asyncio.create_task(end_call_session(call_sid, 0))
+            
+#             # ── Process buffered audio when silence detected ───────────
+#             elif event == "mark":
+#                 if audio_buffer and call_sid and len(audio_buffer) > 3200:
+#                     pcm_bytes = audio_buffer
+#                     audio_buffer = b""
+                    
+#                     # Convert PCM to WAV for Sarvam STT
+#                     wav_bytes = _pcm_to_wav(pcm_bytes)
+                    
+#                     session = active_calls.get(call_sid)
+#                     if not session:
+#                         continue
+                    
+#                     # STT
+#                     stt_result = await _run(transcribe_audio, wav_bytes, "hi-IN", timeout=10.0)
+#                     customer_text = stt_result.get("text", "").strip() if stt_result else ""
+                    
+#                     print(f"[Voicebot] STT: '{customer_text[:120]}'")
+                    
+#                     if not customer_text:
+#                         silence_count = session.get("silence_count", 0) + 1
+#                         session["silence_count"] = silence_count
+#                         if silence_count >= 3:
+#                             await websocket.send_text(json.dumps({"event": "stop"}))
+#                             continue
+#                         retry = "Ji? Kuch suna nahi — thoda louder bolein?"
+#                         audio = await _run(synthesize_speech, retry, "hinglish", timeout=8.0)
+#                     else:
+#                         session["silence_count"] = 0
+#                         detected_lang = stt_result.get("language", "hinglish")
+#                         session["language"] = detected_lang
+                        
+#                         # Groq LLM
+#                         conv = session["conversation"]
+#                         ai_reply = await _run(conv.chat, customer_text, timeout=15.0)
+#                         voice_text = re.sub(r"\{[\s\S]*?\}", "", ai_reply).strip() if ai_reply else ""
+                        
+#                         if not voice_text:
+#                             voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+                        
+#                         print(f"[Voicebot] Priya: {voice_text[:120]}")
+                        
+#                         # TTS
+#                         audio = await _run(synthesize_speech, voice_text, detected_lang, timeout=12.0)
+                    
+#                     if audio:
+#                         pcm = await _run(_mp3_to_pcm, audio, timeout=5.0)
+#                         if pcm:
+#                             b64 = _encode_pcm(pcm)
+#                             await websocket.send_text(json.dumps({
+#                                 "event": "media",
+#                                 "stream_sid": stream_sid,
+#                                 "media": {"payload": b64}
+#                             }))
+    
+#     except WebSocketDisconnect:
+#         print(f"[Voicebot] WebSocket disconnected | SID: {call_sid}")
+#         if call_sid:
+#             asyncio.create_task(end_call_session(call_sid, 0))
+#     except Exception as e:
+#         print(f"[Voicebot] Error: {e}")
+#         if call_sid:
+#             asyncio.create_task(end_call_session(call_sid, 0))
+
+@app.websocket("/call/stream")
+async def voicebot_stream(websocket: WebSocket):
+    await websocket.accept()
+    print("[Voicebot] WebSocket connected")
+
+    call_sid = None
+    stream_sid = ""
+    audio_buffer = b""
+    state = {"listen_after": 0.0}
+    _busy = [False]
+
+    try:
+        async for message in websocket.iter_text():
+            data = json.loads(message)
+            event = data.get("event", "")
+
+            if event == "connected":
+                print("[Voicebot] Stream connected")
+
+            elif event == "start":
+                start_data = data.get("start", {})
+                print(f"[Voicebot] Start event full data: {json.dumps(start_data)}")
+                call_sid = start_data.get("callSid") or start_data.get("call_sid") or ""
+                stream_sid = start_data.get("streamSid") or start_data.get("stream_sid") or ""
+                caller = start_data.get("from", "")
+                print(f"[Voicebot] Call started | SID: {call_sid} | From: {caller}")
+
+                start_call_session(call_sid, caller)
+                session = active_calls.get(call_sid)
+
+                if session:
+                    greeting = get_opening_message(session.get("lead"), is_inbound=True)
+                    session["conversation"].history.append({
+                        "role": "assistant", "content": greeting
+                    })
+
+                    pcm = _greeting_pcm_cache.get("data")
+                    if not pcm:
+                        audio = await _run(synthesize_speech, greeting, "hinglish", timeout=10.0)
+                        if audio:
+                            pcm = await _run(_mp3_to_pcm, audio, timeout=5.0)
+
+                    if pcm:
+                        b64 = base64.b64encode(pcm).decode("ascii")
+                        await websocket.send_text(json.dumps({
+                            "event": "media",
+                            "stream_sid": stream_sid,
+                            "media": {"payload": b64}
+                        }))
+                        greeting_secs = len(pcm) / 16000
+                        state["listen_after"] = time.monotonic() + greeting_secs + 1.0
+                        print(f"[Voicebot] Sent greeting ({len(pcm)} bytes), blocking {greeting_secs:.1f}s")
+                        await websocket.send_text(json.dumps({
+                            "event": "mark",
+                            "stream_sid": stream_sid,
+                            "mark": {"name": "greeting_done"}
+                        }))
+
+            elif event == "media":
+                if _busy[0]:
+                    continue
+                if time.monotonic() < state["listen_after"]:
+                    continue
+                payload = data.get("media", {}).get("payload", "")
+                if not payload:
+                    continue
+
+                chunk = base64.b64decode(payload)
+                audio_buffer += chunk
+
+                if len(audio_buffer) >= 64000 and not _busy[0]:
+                    buf = audio_buffer
+                    audio_buffer = b""
+                    _busy[0] = True
+
+                    async def handle_speech(b=buf):
+                        try:
+                            await _process_speech(b, call_sid, stream_sid, websocket, state)
+                        finally:
+                            _busy[0] = False
+
+                    asyncio.create_task(handle_speech())
+
+            elif event == "stop":
+                print(f"[Voicebot] Stream stopped | SID: {call_sid}")
+                if call_sid:
+                    end_call_session(call_sid, 0)
+
+            elif event == "mark":
+                name = data.get('mark', {}).get('name', '')
+                print(f"[Voicebot] Mark received: {name}")
+
+    except WebSocketDisconnect:
+        print(f"[Voicebot] Disconnected | SID: {call_sid}")
+        if call_sid:
+            end_call_session(call_sid, 0)
+    except Exception as e:
+        print(f"[Voicebot] Error: {e}")
+        if call_sid:
+            end_call_session(call_sid, 0)
+
+# ── AUDIO CONVERSION HELPERS ───────────────────────────────────────────────────
+
+def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 8000) -> bytes:
+    """Convert raw PCM bytes to WAV format for Sarvam STT."""
+    import io, wave
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
+def _mp3_to_pcm(mp3_bytes: bytes) -> bytes:
+    """Convert audio bytes (WAV or MP3) to raw PCM 16-bit 8kHz mono for Exotel."""
+    try:
+        from pydub import AudioSegment
+        import io
+        
+        if not mp3_bytes or len(mp3_bytes) < 100:
+            print(f"[Audio] Audio too small: {len(mp3_bytes)} bytes")
+            return b""
+        
+        # Detect format from magic bytes
+        if mp3_bytes[:4] == b'RIFF':
+            fmt = "wav"
+        elif mp3_bytes[:3] == b'ID3' or mp3_bytes[:2] in (b'\xff\xfb', b'\xff\xf3'):
+            fmt = "mp3"
+        else:
+            fmt = "wav"  # Sarvam default
+        
+        print(f"[Audio] Converting {fmt} ({len(mp3_bytes)} bytes) to PCM")
+        audio = AudioSegment.from_file(io.BytesIO(mp3_bytes), format=fmt)
+        audio = audio.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+        print(f"[Audio] PCM ready: {len(audio.raw_data)} bytes")
+        return audio.raw_data
+    except Exception as e:
+        print(f"[Audio] Audio to PCM failed: {e}")
+        return b""
+
+
+def _encode_pcm(pcm_bytes: bytes) -> str:
+    """Base64 encode PCM bytes for Exotel WebSocket."""
+    return base64.b64encode(pcm_bytes).decode("utf-8")
 
 # ── DASHBOARD HTML ─────────────────────────────────────────────────────────────
 
