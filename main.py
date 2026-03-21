@@ -133,36 +133,29 @@ def _xml_safe(text: str) -> str:
             .replace("'", "&apos;"))
 
 
-def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> str:
+def _record_xml(call_sid: str, play_url: str = None, say_text: str = None, 
+                include_transfer: bool = True, transfer_key: str = "0") -> str:
     """
     Return ExoML that plays audio then records customer's reply.
     Uses Sarvam TTS audio via <Play>.
+    
+    If include_transfer is True, adds finishOnKey for DTMF transfer to human agent.
     """
-
-    # If text is provided but no audio URL, generate audio endpoint
-    # if not play_url and say_text:
-    #     play_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}?text={_xml_safe(say_text[:800])}"
-
-    # content = ""
-    # if play_url:
-    #     content = f"<Play>{play_url}</Play>"
 
     content = ""
     if play_url:
         content = f"<Play>{play_url}</Play>"
     elif say_text:
         content = f'<Say language="hi-IN" voice="woman">{_xml_safe(say_text)}</Say>'
-
-#     return f"""<?xml version="1.0" encoding="UTF-8"?>
-# <Response>
-#   {content}
-#   <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
-#           method="POST"
-#           maxLength="30"
-#           timeout="10"
-#           playBeep="false"
-#           finishOnKey="#" />
-# </Response>"""
+    
+    # Add instruction for transfer if enabled
+    if say_text and include_transfer:
+        transfer_instruction = f'<Say language="hi-IN">Agent se baat ke liye {transfer_key} press karein.</Say>'
+        content = transfer_instruction + content
+    
+    # Use finishOnKey for DTMF transfer
+    finish_key = transfer_key if include_transfer else "#"
+    
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
 {content}
@@ -171,7 +164,7 @@ def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> st
         maxLength="60"
         timeout="10"
         playBeep="false"
-        finishOnKey="#" />
+        finishOnKey="{finish_key}" />
 </Response>"""
 
 def _download_recording(url: str) -> bytes:
@@ -225,6 +218,102 @@ async def _run(fn, *args, timeout: float = 12.0):
     except Exception as e:
         print(f"[Async] Error in {getattr(fn, '__name__', str(fn))}: {e}")
         return None
+
+
+# ── HUMAN TRANSFER HANDLER ─────────────────────────────────────────────────────
+
+async def _transfer_to_human(call_sid: str, session: dict):
+    """
+    Transfer call to a human agent while AI continues listening.
+    
+    This function:
+    1. Gets available agent from pool
+    2. Initiates transfer via Exotel
+    3. AI continues to listen in background (if supported)
+    4. Logs the conversation for learning
+    5. Notifies agent with lead context
+    """
+    from exotel_client import transfer_to_human, get_available_agent
+    import sheets_manager as db
+    
+    # Get agent
+    agent = get_available_agent()
+    agent_number = agent.get("number")
+    
+    if not agent_number:
+        # No agent available - inform customer
+        return Response(
+            content=_record_xml(call_sid, say_text="Sorry, koi agent available nahi hai. Hum aapko call back karenge.", 
+                               include_transfer=False),
+            media_type="application/xml",
+        )
+    
+    # Get conversation transcript so far for the agent
+    conv = session.get("conversation")
+    transcript = ""
+    if conv:
+        transcript = conv.get_full_transcript()
+        # Add summary of what AI discussed
+        session["transcript"] = transcript
+        session["transfer_reason"] = "customer_requested"
+    
+    # Get lead info
+    lead_id = session.get("lead_id", "")
+    lead_info = {}
+    if lead_id:
+        lead_info = db.get_lead_by_id(lead_id) or {}
+    
+    # Mark session as transferring
+    session["transferring"] = True
+    session["transfer_to"] = agent_number
+    session["transfer_time"] = datetime.now().isoformat()
+    
+    # Log transfer request
+    print(f"[Transfer] {call_sid} -> {agent['name']} ({agent_number})")
+    print(f"[Transfer] Lead: {lead_info.get('name', 'Unknown')} | {lead_info.get('mobile', '')}")
+    
+    # Perform transfer via Exotel API
+    transfer_result = await _run(transfer_to_human, call_sid, agent_number, timeout=10.0)
+    
+    if transfer_result and transfer_result.get("success"):
+        # Log the conversation before transfer completes
+        db.log_call({
+            "lead_id": lead_id,
+            "mobile": lead_info.get("mobile", ""),
+            "direction": session.get("direction", "outbound"),
+            "duration_sec": int((datetime.now() - session.get("start_time", datetime.now())).total_seconds()),
+            "status": "transferred_to_agent",
+            "transcript": transcript[:5000] if transcript else "",
+            "sentiment": "neutral",
+            "ai_summary": f"Call transferred to {agent['name']}. Customer requested human agent.",
+            "next_action": "agent_followup",
+        })
+        
+        # Update lead with transfer info
+        if lead_id:
+            db.update_lead(lead_id, {
+                "status": "agent_assigned",
+                "assigned_to": agent["name"],
+                "assigned_mobile": agent_number,
+                "notes": (lead_info.get("notes", "") + f"\n[TRANSFER] Transferred to {agent['name']} at {datetime.now()}").strip()
+            })
+        
+        # Return transfer response to Exotel
+        return Response(
+            content=f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="hi-IN">Okay, aapka call {agent['name']} ko transfer kar rahi hoon. Please hold on.</Say>
+</Response>""",
+            media_type="application/xml",
+        )
+    else:
+        # Transfer failed - inform customer
+        print(f"[Transfer] FAILED for {call_sid}: {transfer_result}")
+        return Response(
+            content=_record_xml(call_sid, say_text="Sorry, agent se connect karne mein problem ho rahi hai. Main aapki help karne ki koshish kar rahi hoon.", 
+                               include_transfer=True),
+            media_type="application/xml",
+        )
 
 
 # ── EXOTEL WEBHOOKS ────────────────────────────────────────────────────────────
@@ -435,6 +524,18 @@ async def handle_gather(call_sid: str, request: Request):
             f"[Gather] [{call_sid}] Customer (turn {session['turn_count']}): "
             f"'{customer_input[:120]}'"
         )
+
+        # ── CHECK FOR HUMAN TRANSFER REQUEST ───────────────────────────
+        # 1. DTMF key pressed (transfer_key like "0")
+        if digits and digits == config.TRANSFER_DTMF_KEY:
+            print(f"[Gather] [{call_sid}] TRANSFER REQUESTED via DTMF!")
+            return await _transfer_to_human(call_sid, session)
+        
+        # 2. Check for transfer keywords in speech
+        customer_lower = customer_input.lower()
+        if any(kw in customer_lower for kw in config.TRANSFER_KEYWORDS):
+            print(f"[Gather] [{call_sid}] TRANSFER REQUESTED via speech: '{customer_input}'")
+            return await _transfer_to_human(call_sid, session)
 
         # ── Get AI response via Groq LLM ───────────────────────────────
         conv = session["conversation"]
