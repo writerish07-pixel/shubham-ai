@@ -302,6 +302,149 @@ async def _transfer_to_human(call_sid: str, session: dict):
         )
 
 
+async def _transfer_to_hot_agent(call_sid: str, session: dict, lead_data: dict):
+    """
+    Automatically transfer call to agent when AI detects HOT lead.
+    Called when lead is ready to buy (temperature=hot or convert_to_sale=true).
+    
+    This gives the customer immediate connection to close the sale!
+    """
+    from exotel_client import transfer_to_human, get_available_agent
+    import sheets_manager as db
+    
+    # Get agent
+    agent = get_available_agent()
+    agent_number = agent.get("number")
+    
+    if not agent_number:
+        # No agent - inform customer and schedule callback
+        return Response(
+            content=_record_xml(call_sid, say_text="Ji! Aap ready lag rahe hain! Sorry, abhi agent available nahi hai. Hum aapko call back karenge.", 
+                               include_transfer=False),
+            media_type="application/xml",
+        )
+    
+    # Get conversation and lead info
+    conv = session.get("conversation")
+    transcript = ""
+    if conv:
+        transcript = conv.get_full_transcript()
+    
+    lead_id = session.get("lead_id", "")
+    lead_info = {}
+    if lead_id:
+        lead_info = db.get_lead_by_id(lead_id) or {}
+    
+    # Prepare lead summary for agent
+    interested_model = lead_data.get("interested_model", lead_info.get("interested_model", ""))
+    budget = lead_data.get("budget", lead_info.get("budget", ""))
+    customer_name = lead_data.get("customer_name", lead_info.get("name", "Customer"))
+    
+    # Mark session
+    session["transferring"] = True
+    session["transfer_reason"] = "hot_lead_auto"
+    session["transfer_time"] = datetime.now().isoformat()
+    
+    # Log the HOT lead transfer
+    print(f"[HOT TRANSFER] {call_sid} -> {agent['name']} (HOT LEAD!)")
+    print(f"[HOT] Customer: {customer_name} | Model: {interested_model} | Budget: {budget}")
+    
+    # First, tell customer an agent will take the call
+    inform_text = "Ji! Aap bahut interested lag rahe hain! Ek min, aapko humare experienced agent se connect karwati hain. Woh aapko best deal dilayenge!"
+    
+    # Generate TTS for the announcement
+    ai_audio = await _run(synthesize_speech, inform_text, "hinglish", timeout=12.0)
+    
+    if ai_audio:
+        audio_path = UPLOAD_DIR / f"hot_transfer_{call_sid}.mp3"
+        audio_path.write_bytes(ai_audio)
+        audio_url = f"{config.PUBLIC_URL}/call/audio/hot/{call_sid}"
+        
+        # Play announcement and then transfer
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Play>{audio_url}</Play>
+    <Redirect>{config.PUBLIC_URL}/call/transfer/{call_sid}?agent={agent_number}</Redirect>
+</Response>"""
+    else:
+        # Fallback - just transfer
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="hi-IN">Ji! Aapke liye agent ko connect kar rahi hoon.</Say>
+    <Redirect>{config.PUBLIC_URL}/call/transfer/{call_sid}?agent={agent_number}</Redirect>
+</Response>"""
+    
+    # Log the call
+    db.log_call({
+        "lead_id": lead_id,
+        "mobile": lead_info.get("mobile", ""),
+        "direction": session.get("direction", "outbound"),
+        "duration_sec": int((datetime.now() - session.get("start_time", datetime.now())).total_seconds()),
+        "status": "transferred_to_agent_hot",
+        "transcript": transcript[:5000] if transcript else "",
+        "sentiment": "positive",
+        "ai_summary": f"HOT LEAD! Transferred to {agent['name']}. Interested: {interested_model}, Budget: {budget}",
+        "next_action": "close_sale",
+    })
+    
+    # Update lead status
+    if lead_id:
+        db.update_lead(lead_id, {
+            "status": "agent_assigned",
+            "temperature": "hot",
+            "assigned_to": agent["name"],
+            "assigned_mobile": agent_number,
+            "notes": f"[HOT LEAD AUTO-TRANSFER] Transferred to {agent['name']} at {datetime.now()}\nInterested: {interested_model}\nBudget: {budget}\nPrevious: {lead_info.get('notes', '')}"
+        })
+    
+    # Notify agent via SMS with lead details
+    from exotel_client import send_sms
+    agent_msg = (
+        f"🔥 HOT LEAD ALERT!\n"
+        f"Customer: {customer_name}\n"
+        f"Mobile: {lead_info.get('mobile', '')}\n"
+        f"Interested: {interested_model}\n"
+        f"Budget: {budget}\n"
+        f"Call now - they're ready to buy!"
+    )
+    send_sms(agent_number, agent_msg)
+    
+    return Response(content=xml, media_type="application/xml")
+
+
+# ── Transfer redirect endpoint ─────────────────────────────────────────────────
+@app.api_route("/call/transfer/{call_sid}", methods=["GET", "POST"])
+async def transfer_redirect(call_sid: str, request: Request):
+    """Handle the redirect after hot lead announcement."""
+    agent_number = ""
+    if request.method == "GET":
+        params = request.query_params
+    else:
+        params = await request.form()
+    agent_number = params.get("agent", "")
+    
+    if not agent_number:
+        return Response(content=_hangup_xml(), media_type="application/xml")
+    
+    # Perform the actual transfer
+    from exotel_client import transfer_to_human
+    transfer_result = transfer_to_human(call_sid, agent_number)
+    
+    if transfer_result.get("success"):
+        return Response(
+            content=f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="hi-IN">Please hold, connecting you to our agent.</Say>
+</Response>""",
+            media_type="application/xml",
+        )
+    else:
+        return Response(
+            content=_record_xml(call_sid, say_text="Sorry, connection problem ho gaya. Hum aapko call back karenge."),
+            media_type="application/xml",
+        )
+
+
 # ── EXOTEL WEBHOOKS ────────────────────────────────────────────────────────────
 
 @app.api_route("/call/incoming", methods=["GET", "POST"])
@@ -492,6 +635,24 @@ async def handle_gather(call_sid: str, request: Request):
             voice_text = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
 
         print(f"[Gather] [{call_sid}] Priya: {voice_text[:120]}")
+
+        # ── CHECK FOR HOT LEAD AUTO-TRANSFER ───────────────────────────
+        # After AI response, check if lead is HOT and ready to buy
+        # Parse the JSON block from AI response for lead classification
+        try:
+            import json
+            json_match = re.search(r'\{[\s\S]*?\}', ai_reply)
+            if json_match:
+                lead_data = json.loads(json_match.group())
+                temperature = lead_data.get("temperature", "").lower()
+                convert_to_sale = lead_data.get("convert_to_sale", False)
+                
+                # Auto-transfer if HOT and ready to buy
+                if temperature == "hot" or convert_to_sale:
+                    print(f"[Gather] [{call_sid}] 🔥 HOT LEAD DETECTED! Auto-transferring to agent...")
+                    return await _transfer_to_hot_agent(call_sid, session, lead_data)
+        except Exception as e:
+            print(f"[Gather] [{call_sid}] Hot lead detection error: {e}")
 
         # ── Detect language for TTS routing ────────────────────────────
         devanagari_count = sum(1 for c in customer_input if "\u0900" <= c <= "\u097F")
