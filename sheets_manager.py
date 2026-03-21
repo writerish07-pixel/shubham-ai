@@ -82,6 +82,7 @@ def add_lead(lead: dict) -> str:
             "name":             lead.get("name", ""),
             "mobile":           lead.get("mobile", ""),
             "alternate_mobile": lead.get("alternate_mobile", ""),
+            "whatsapp":         lead.get("whatsapp", ""),
             "city":             lead.get("city", config.BUSINESS_CITY),
             "area":             lead.get("area", ""),
             "interested_model": lead.get("interested_model", ""),
@@ -98,6 +99,15 @@ def add_lead(lead: dict) -> str:
             "created_at":       now,
             "converted_at":     "",
             "tags":             lead.get("tags", ""),
+            # Family profiling fields for future sales
+            "occupation":       lead.get("occupation", ""),
+            "family_members":   lead.get("family_members", ""),
+            "spouse_name":      lead.get("spouse_name", ""),
+            "spouse_interest":  lead.get("spouse_interest", ""),
+            "children_count":   lead.get("children_count", 0),
+            "children_ages":    lead.get("children_ages", ""),
+            "family_upsell":    lead.get("family_upsell", ""),
+            "age_estimate":     lead.get("age_estimate", ""),
         }
         leads.append(new_lead)
         _save_unlocked(LEADS_FILE, leads)
