@@ -160,3 +160,77 @@ def notify_salesperson(salesperson: dict, lead: dict) -> bool:
     
     result = send_sms(salesperson["mobile"], message)
     return result.get("success", False)
+
+
+# ── HUMAN AGENT TRANSFER ───────────────────────────────────────────────────────
+
+def transfer_to_human(call_sid: str, agent_number: str = None) -> dict:
+    """
+    Transfer an ongoing call to a human agent.
+    Uses Exotel's 'Transfer' API to bridge the call.
+    
+    Args:
+        call_sid: The current call SID to transfer
+        agent_number: Target agent's phone number. If None, uses PRIMARY_AGENT_NUMBER
+    
+    Returns:
+        dict with success status and transfer details
+    """
+    import config
+    
+    if not agent_number:
+        agent_number = config.PRIMARY_AGENT_NUMBER
+    
+    if not agent_number:
+        log.error("No agent number configured for transfer")
+        return {"success": False, "error": "No agent number configured"}
+    
+    if not config.EXOTEL_API_KEY or not config.EXOTEL_API_TOKEN:
+        log.error("Cannot transfer -- Exotel credentials not configured")
+        return {"success": False, "error": "Exotel credentials not configured"}
+    
+    url = f"https://{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Calls/{call_sid}/transfer"
+    
+    payload = {
+        "PhoneNumber": agent_number,
+        "CallerId": config.EXOTEL_PHONE_NUMBER,
+    }
+    
+    try:
+        r = _request_with_retry(
+            "POST", url, data=payload, timeout=15,
+            auth=(config.EXOTEL_API_KEY, config.EXOTEL_API_TOKEN),
+        )
+        data = r.json()
+        log.info("Call %s transferred to agent %s", call_sid, agent_number)
+        return {"success": True, "agent_number": agent_number, "data": data}
+    except Exception as e:
+        log.error("Transfer failed for call %s: %s", call_sid, e)
+        return {"success": False, "error": str(e)}
+
+
+def get_available_agent() -> dict:
+    """
+    Get an available agent for transfer.
+    Uses round-robin from AGENT_NUMBERS or falls back to PRIMARY_AGENT_NUMBER.
+    
+    Returns:
+        dict with agent number and name
+    """
+    import config
+    
+    # Use configured agents list with round-robin
+    if config.AGENT_NUMBERS:
+        import itertools
+        _agent_cycle = itertools.cycle(config.AGENT_NUMBERS)
+        agent = next(_agent_cycle)
+        return agent
+    
+    # Fallback to primary agent
+    if config.PRIMARY_AGENT_NUMBER:
+        return {
+            "number": config.PRIMARY_AGENT_NUMBER,
+            "name": config.PRIMARY_AGENT_NAME
+        }
+    
+    return {"number": "", "name": "No Agent"}

@@ -60,6 +60,28 @@ SILENCE_TIMEOUT_SECONDS = int(os.getenv("SILENCE_TIMEOUT_SECONDS", "5"))
 PUBLIC_URL              = os.getenv("PUBLIC_URL", "http://localhost:5000").strip()
 PORT                    = int(os.getenv("PORT", "5000"))
 
+# -- Human Agent Transfer -------------------------------------------------------
+# Primary agent for transfer (salesperson)
+PRIMARY_AGENT_NUMBER    = os.getenv("PRIMARY_AGENT_NUMBER", "").strip()
+PRIMARY_AGENT_NAME     = os.getenv("PRIMARY_AGENT_NAME", "Sales Agent").strip()
+
+# Secondary agents (can be rotated)
+AGENT_NUMBERS = []
+for i in range(1, 6):
+    agent_num = (os.getenv(f"AGENT_{i}_NUMBER") or "").strip()
+    agent_name = (os.getenv(f"AGENT_{i}_NAME") or f"Agent {i}").strip()
+    if agent_num:
+        AGENT_NUMBERS.append({"number": agent_num, "name": agent_name})
+
+# Transfer trigger - customer can say keywords or press a key
+TRANSFER_KEYWORDS = [
+    "transfer", "agent", "manager", "supervisor", "human",
+    "baat karna hai", "agent se baat karni hai", "aadmi se baat karna hai",
+    "madad", "sirf manager"
+]
+# DTMF key for transfer (customer presses this during call)
+TRANSFER_DTMF_KEY = os.getenv("TRANSFER_DTMF_KEY", "0")
+
 
 # -- Startup validation -------------------------------------------------------
 def validate_config() -> list:
@@ -79,4 +101,6 @@ def validate_config() -> list:
         warnings.append("PUBLIC_URL is localhost -- Exotel webhooks require a public URL (use ngrok)")
     if not SALES_TEAM:
         warnings.append("No salesperson configured -- hot lead assignment disabled")
+    if not PRIMARY_AGENT_NUMBER and not AGENT_NUMBERS:
+        warnings.append("No human agent configured -- transfer to human will not work")
     return warnings
