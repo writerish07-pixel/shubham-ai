@@ -239,24 +239,29 @@ def retrieve_relevant(query: str, top_k: int = None,
         min_similarity = config.RAG_MIN_SIMILARITY
 
     try:
-        index = _get_faiss_index()
-        if index.ntotal == 0:
-            return []
+        # 🔥 FIX: Acquire lock to prevent race condition with concurrent store operations
+        with _lock:
+            index = _get_faiss_index()
+            if index.ntotal == 0:
+                return []
 
-        query_embedding = embed_text(query).reshape(1, -1)
+            query_embedding = embed_text(query).reshape(1, -1)
 
-        # Search more than needed if filtering by type
-        search_k = min(top_k * 3 if filter_type else top_k, index.ntotal)
-        scores, indices = index.search(query_embedding, search_k)
+            # Search more than needed if filtering by type
+            search_k = min(top_k * 3 if filter_type else top_k, index.ntotal)
+            scores, indices = index.search(query_embedding, search_k)
+
+            # Snapshot metadata under lock to avoid race with concurrent writes
+            metadata_snapshot = list(_metadata_store)
 
         results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(_metadata_store):
+            if idx < 0 or idx >= len(metadata_snapshot):
                 continue
             if score < min_similarity:
                 continue
 
-            entry = _metadata_store[idx]
+            entry = metadata_snapshot[idx]
             if filter_type and entry.get("metadata", {}).get("type") != filter_type:
                 continue
 

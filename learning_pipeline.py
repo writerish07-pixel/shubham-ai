@@ -124,10 +124,12 @@ async def analyze_call_transcript(transcript: str, call_sid: str = "",
 # 🔥 SELF-LEARNING ADDED: Store learnings in vector DB + JSON
 # ══════════════════════════════════════════════════════════════════════════════
 
+# 🔥 SELF-LEARNING ADDED: Module-level lock for thread-safe file writes
+_file_lock = __import__('threading').Lock()
+
+
 def _append_json(filepath: Path, entry: dict):
     """Thread-safe append to a JSON array file."""
-    import threading
-    _file_lock = threading.Lock()
     with _file_lock:
         data = []
         if filepath.exists():
