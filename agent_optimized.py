@@ -193,8 +193,14 @@ class ConversationManager:
 
     def chat(self, user_message: str) -> str:
         """Synchronous chat — uses hybrid model routing."""
+        # 🔥 FIX: Append user message BEFORE the API call so trimmed_history
+        # includes it, but track a rollback index in case of timeout/cancellation.
+        # The caller (_run with timeout) may abandon this thread; if the Groq call
+        # eventually completes after timeout, the assistant response is still
+        # appended here. To prevent that, we use a version counter.
         self.history.append({"role": "user", "content": user_message})
         self.user_word_count += len(user_message.split())
+        history_len_before = len(self.history)
         
         # 🔥 OPTIMIZATION: Hybrid model routing
         complexity = classify_query_complexity(user_message)
@@ -228,8 +234,13 @@ class ConversationManager:
             log.error("Groq chat failed: %s", exc)
             ai_reply = "Ji, main samajh rahi hoon. Thoda aur detail dein?"
 
-        self.history.append({"role": "assistant", "content": ai_reply})
-        self.ai_word_count += len(ai_reply.split())
+        # 🔥 FIX: Only append assistant response if history hasn't been
+        # modified by the main thread (e.g. via add_exchange recording a
+        # fallback after _run timeout). If another assistant message was
+        # already added for this turn, skip to avoid corrupting history.
+        if len(self.history) == history_len_before:
+            self.history.append({"role": "assistant", "content": ai_reply})
+            self.ai_word_count += len(ai_reply.split())
         return ai_reply
     
     def chat_streaming(self, user_message: str):

@@ -5,7 +5,7 @@ Pre-generates TTS audio for common Priya phrases at startup.
 OPTIMIZATIONS:
 - 🔥 OPTIMIZATION: Added intent response phrases to cache (covers ~80% of responses)
 - 🔥 OPTIMIZATION: Normalized text comparison for better cache hits
-- 🔥 OPTIMIZATION: Lower similarity threshold for more cache hits (0.78 vs 0.82)
+- 🔥 FIX: Raised similarity threshold to 0.92 to prevent wrong audio for similar phrases
 - 🔥 OPTIMIZATION: Hash-based exact match before fuzzy matching
 """
 import logging
@@ -41,8 +41,9 @@ CACHED_PHRASES = [
 ]
 
 _cache: dict[str, bytes] = {}
-# 🔥 OPTIMIZATION: Lower threshold for more cache hits
-SIMILARITY_THRESHOLD = 0.78
+# 🔥 FIX: Raised threshold from 0.78 to 0.92 to prevent serving wrong
+# cached audio when LLM-generated text is similar but semantically different
+SIMILARITY_THRESHOLD = 0.92
 
 # 🔥 OPTIMIZATION: Normalized exact match index for O(1) lookup
 _exact_index: dict[str, bytes] = {}

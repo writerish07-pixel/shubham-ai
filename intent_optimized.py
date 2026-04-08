@@ -23,6 +23,35 @@ INTENTS = {
         # 🔥 OPTIMIZATION: Shorter response — fewer TTS characters
         "response": "Bahut accha! Aap kab aa rahe hain — aaj ya kal?"
     },
+    # 🔥 FIX: Moved busy, not_interested, callback BEFORE acknowledgement
+    # so compound phrases like "haan, busy hoon" match the specific intent
+    # first instead of matching acknowledgement's broad "haan" pattern.
+    "busy": {
+        "patterns": frozenset([
+            "busy", "baad mein", "baad me", "abhi nahi", "abhi mat",
+            "baad mein call", "later", "free nahi", "time nahi",
+            "व्यस्त", "बाद में", "अभी नहीं", "बाद में कॉल", "फ्री नहीं",
+            "टाइम नहीं", "अभी मत", "meeting mein", "driving",
+        ]),
+        "response": "Koi baat nahi! Kab call karoon — aapko kab free rahega?"
+    },
+    "not_interested": {
+        "patterns": frozenset([
+            "nahi chahiye", "interest nahi", "mat karo call", "band karo",
+            "hata lo number", "nahi lena", "no thanks", "नहीं चाहिए", "इंटरेस्ट नहीं",
+            "मत करो कॉल", "बंद करो", "हटा लो नंबर", "नहीं लेना", "कोई जरूरत नहीं",
+            "zaroorat nahi", "जरूरत नहीं", "don't call",
+        ]),
+        "response": "Koi baat nahi ji! Zaroorat ho toh call karein. Dhanyavaad!"
+    },
+    "callback": {
+        "patterns": frozenset([
+            "call karo", "call karna", "phone karo", "phone karna",
+            "baad mein baat", "call back", "कॉल करो", "कॉल करना",
+            "फोन करो", "फोन करना", "बाद में बात", "कॉल बैक", "बाद में कॉल करो",
+        ]),
+        "response": "Bilkul! Kab call karoon — subah ya shaam?"
+    },
     "acknowledgement": {
         "patterns": frozenset([
             "haan", "han", "haa", "ok", "okay", "theek", "theek hai",
@@ -33,15 +62,6 @@ INTENTS = {
         # 🔥 FIX: Removed short patterns ('ha', 'g', 'ji') that cause false-positive
         # substring matches in words like 'kahan', 'glamour', 'jaipur' etc.
         "response": "Accha ji! Kab showroom aa sakte hain test ride ke liye?"
-    },
-    "busy": {
-        "patterns": frozenset([
-            "busy", "baad mein", "baad me", "abhi nahi", "abhi mat",
-            "baad mein call", "later", "free nahi", "time nahi",
-            "व्यस्त", "बाद में", "अभी नहीं", "बाद में कॉल", "फ्री नहीं",
-            "टाइम नहीं", "अभी मत", "meeting mein", "driving",
-        ]),
-        "response": "Koi baat nahi! Kab call karoon — aapko kab free rahega?"
     },
     "address": {
         "patterns": frozenset([
@@ -68,23 +88,6 @@ INTENTS = {
             "चला के देखना", "ड्राइव करना", "राइड करना", "चलाकर देखना",
         ]),
         "response": "Test ride free hai! Aap kab aa sakte hain?"
-    },
-    "not_interested": {
-        "patterns": frozenset([
-            "nahi chahiye", "interest nahi", "mat karo call", "band karo",
-            "hata lo number", "nahi lena", "no thanks", "नहीं चाहिए", "इंटरेस्ट नहीं",
-            "मत करो कॉल", "बंद करो", "हटा लो नंबर", "नहीं लेना", "कोई जरूरत नहीं",
-            "zaroorat nahi", "जरूरत नहीं", "don't call",
-        ]),
-        "response": "Koi baat nahi ji! Zaroorat ho toh call karein. Dhanyavaad!"
-    },
-    "callback": {
-        "patterns": frozenset([
-            "call karo", "call karna", "phone karo", "phone karna",
-            "baad mein baat", "call back", "कॉल करो", "कॉल करना",
-            "फोन करो", "फोन करना", "बाद में बात", "कॉल बैक", "बाद में कॉल करो",
-        ]),
-        "response": "Bilkul! Kab call karoon — subah ya shaam?"
     },
     # 🔥 OPTIMIZATION: New intents to catch more patterns without Groq
     "thanks": {

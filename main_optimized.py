@@ -379,6 +379,10 @@ async def handle_gather(call_sid: str, request: Request):
                 voice_text = re.sub(r"\{[\s\S]*?\}", "", ai_reply).strip()
             if not voice_text:
                 voice_text = "Ji, samajh rahi hoon. Thoda aur detail dein?"
+                # 🔥 FIX: Record fallback in history so the orphaned thread
+                # (still running conv.chat after timeout) sees history changed
+                # and skips its late assistant append, preventing corruption.
+                conv.add_ai_message(voice_text)
 
         print(f"[Gather] [{call_sid}] Priya: {voice_text[:120]}")
 
