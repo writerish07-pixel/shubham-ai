@@ -72,19 +72,24 @@ def classify_query_complexity(text: str) -> str:
         return "smart"
 
     # 🔥 SELF-LEARNING ADDED: Competitor mentions always need smart model
+    # Non-brand indicators are safe for substring matching (no Hindi conflicts)
     complex_indicators = [
         "discount", "competitor", "compare", "problem", "issue",
-        "complaint", "doosri", "dusri", "honda", "bajaj", "tvs",
+        "complaint", "doosri", "dusri",
         "sochna", "family", "wife", "husband", "loan", "finance",
         "emi kitni", "exchange", "purani bike",
-        # 🔥 SELF-LEARNING ADDED: More competitor and objection indicators
-        "yamaha", "suzuki", "royal enfield", "ktm", "ola", "ather",
         "mehenga", "sasta", "expensive", "cheap", "better", "accha nahi",
         "khareed liya", "le liya", "bought", "already",
     ]
     for indicator in complex_indicators:
         if indicator in text_clean:
             return "smart"
+
+    # 🔥 FIX: Use word-boundary regex for brand names to avoid false positives
+    # (e.g. "ola" in "bola", "jawa" in "jawab" — common Hindi words).
+    from sales_intelligence import _COMPETITOR_BRAND_RE
+    if _COMPETITOR_BRAND_RE.search(text_clean):
+        return "smart"
 
     return "fast"
 

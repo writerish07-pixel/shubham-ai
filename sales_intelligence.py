@@ -207,11 +207,21 @@ def _load_file(filepath: Path) -> list:
 # 🔥 SELF-LEARNING ADDED: Real-time competitor detection for live calls
 # ══════════════════════════════════════════════════════════════════════════════
 
+# 🔥 FIX: Pre-compile word-boundary regex for each competitor brand.
+# Plain substring matching caused false positives: "ola" matched "bola"
+# (Hindi for "said"), "jawa" matched "jawab" (Hindi for "answer").
+import re as _re
+_COMPETITOR_BRAND_RE = _re.compile(
+    r"\b(?:" + "|".join(_re.escape(b) for b in config.COMPETITOR_BRANDS) + r")\b",
+    _re.IGNORECASE,
+)
+
+
 def detect_competitor_mention(text: str) -> Optional[dict]:
     """
     🔥 SALES INTELLIGENCE LOGIC: Detect competitor brand/model mentions in text.
 
-    Fast, regex-free detection — used during live calls for real-time alerts.
+    Uses word-boundary regex — used during live calls for real-time alerts.
 
     Args:
         text: Customer's spoken text
@@ -220,11 +230,10 @@ def detect_competitor_mention(text: str) -> Optional[dict]:
         {"brand": "honda", "context": "customer comparing with Honda Activa"}
         or None if no competitor detected.
     """
-    text_lower = text.lower()
-    for brand in config.COMPETITOR_BRANDS:
-        if brand in text_lower:
-            return {
-                "brand": brand,
-                "context": text[:200],
-            }
+    m = _COMPETITOR_BRAND_RE.search(text)
+    if m:
+        return {
+            "brand": m.group().lower(),
+            "context": text[:200],
+        }
     return None
