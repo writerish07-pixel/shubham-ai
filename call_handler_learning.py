@@ -69,13 +69,16 @@ def start_call_session(call_sid: str, caller_number: str,
     )
 
     # 🔥 SELF-LEARNING ADDED: Use learning-enabled conversation manager
+    # 🔥 FIX: Use the already-computed is_inbound variable instead of
+    # re-deriving it — the simple (direction != "outbound") misses the
+    # fallback logic when direction is None.
     session = {
         "call_sid": call_sid,
         "lead_id": lead_id or (lead.get("lead_id") if lead else ""),
         "caller": caller_number,
         "lead": lead,
         "conversation": ConversationManagerLearning(
-            lead, is_inbound=(direction != "outbound")
+            lead, is_inbound=is_inbound
         ),
         "start_time": time.time(),
         "language": "hinglish",

@@ -208,7 +208,10 @@ def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str
                 # Single sentence longer than chunk_size — force split
                 while len(sentence) > chunk_size:
                     chunks.append(sentence[:chunk_size])
-                    sentence = sentence[chunk_size - overlap:] if overlap else sentence[chunk_size:]
+                    # 🔥 FIX: Guarantee forward progress even when
+                    # overlap >= chunk_size (misconfiguration guard).
+                    advance = max(chunk_size - overlap, 1)
+                    sentence = sentence[advance:]
                 current_chunk = sentence
 
     if current_chunk.strip():
