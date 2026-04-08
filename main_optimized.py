@@ -367,8 +367,8 @@ async def handle_gather(call_sid: str, request: Request):
         intent_response = detect_intent(customer_input, lead=session.get("lead"))
         if intent_response:
             voice_text = intent_response
-            conv.history.append({"role": "user", "content": customer_input})
-            conv.history.append({"role": "assistant", "content": voice_text})
+            # 🔥 FIX: Use add_exchange to track word counts for talk ratio
+            conv.add_exchange(customer_input, voice_text)
             print(f"[Gather] [{call_sid}] Intent matched — skipping Groq")
         else:
             # 🔥 OPTIMIZATION: Hybrid model routing happens inside conv.chat()
@@ -395,6 +395,17 @@ async def handle_gather(call_sid: str, request: Request):
         # 🔥 OPTIMIZATION: Check phrase cache FIRST (instant, no API call)
         from phrase_cache_optimized import get_cached_audio
         cached_pcm = get_cached_audio(voice_text)
+
+        # 🔥 FIX: Clean up stale response files from previous turns
+        # Prevents serving wrong audio when format switches between MP3 and WAV
+        for ext in ["mp3", "wav"]:
+            stale = UPLOAD_DIR / f"response_{call_sid}.{ext}"
+            if stale.exists():
+                try:
+                    stale.unlink()
+                except Exception:
+                    pass
+
         if cached_pcm:
             print(f"[PhraseCache] Serving cached audio ({len(cached_pcm)} bytes)")
             # 🔥 FIX: Convert raw PCM to proper WAV with headers before writing
@@ -621,8 +632,8 @@ async def _process_speech_optimized(buf: bytes, call_sid: str, stream_sid: str, 
         intent_response = detect_intent(customer_text, lead=session.get("lead"))
         if intent_response:
             voice_text = intent_response
-            conv.history.append({"role": "user", "content": customer_text})
-            conv.history.append({"role": "assistant", "content": voice_text})
+            # 🔥 FIX: Use add_exchange to track word counts for talk ratio
+            conv.add_exchange(customer_text, voice_text)
         else:
             # 4. 🔥 OPTIMIZATION: Hybrid model routing (inside conv.chat)
             ai_reply = await _run(conv.chat, customer_text, timeout=config.LLM_TIMEOUT_SEC)
@@ -703,9 +714,8 @@ async def voicebot_stream(websocket: WebSocket):
 
                 if session:
                     greeting = get_opening_message(session.get("lead"), is_inbound=True)
-                    session["conversation"].history.append({
-                        "role": "assistant", "content": greeting
-                    })
+                    # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
+                    session["conversation"].add_ai_message(greeting)
 
                     pcm = _greeting_pcm_cache.get("data")
                     if not pcm:

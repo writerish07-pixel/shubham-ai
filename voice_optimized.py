@@ -317,7 +317,8 @@ async def _sarvam_tts_async(text: str, language: str = "hi-IN") -> bytes:
     for result in results:
         if isinstance(result, Exception):
             print(f"[Voice] TTS chunk failed: {result}")
-            continue
+            # 🔥 FIX: If any chunk fails, discard all and raise so caller falls back to <Say>
+            raise result
         all_audio += result
 
     return all_audio

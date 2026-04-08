@@ -77,9 +77,8 @@ def get_opening_audio(call_sid: str) -> bytes:
     opening_text = get_opening_message(lead, is_inbound=is_inbound)
     print(f"[CallHandler] Opening text: {opening_text[:120]}")
 
-    session["conversation"].history.append({
-        "role": "assistant", "content": opening_text
-    })
+    # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
+    session["conversation"].add_ai_message(opening_text)
 
     # 🔥 OPTIMIZATION: Uses optimized voice module with connection pooling
     audio = synthesize_speech(opening_text, "hinglish")
@@ -122,8 +121,8 @@ async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> by
     if intent_response:
         voice_text = intent_response
         conv = session["conversation"]
-        conv.history.append({"role": "user", "content": customer_text})
-        conv.history.append({"role": "assistant", "content": voice_text})
+        # 🔥 FIX: Use add_exchange to track word counts for talk ratio
+        conv.add_exchange(customer_text, voice_text)
         print(f"[CallHandler] [{call_sid}] Intent matched — skipping Groq")
     else:
         # 3. Get AI response (hybrid model routing)
@@ -166,8 +165,8 @@ def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
     conv = session["conversation"]
     if intent_response:
         voice_text = intent_response
-        conv.history.append({"role": "user", "content": customer_text})
-        conv.history.append({"role": "assistant", "content": voice_text})
+        # 🔥 FIX: Use add_exchange to track word counts for talk ratio
+        conv.add_exchange(customer_text, voice_text)
     else:
         ai_reply = conv.chat(customer_text)
         voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
