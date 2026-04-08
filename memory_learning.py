@@ -30,7 +30,9 @@ log = logging.getLogger("shubham-ai.memory")
 _faiss_index = None
 _embedding_model = None
 _metadata_store: list[dict] = []
-_lock = threading.Lock()
+# 🔥 FIX: Use RLock (re-entrant) — store/retrieve acquire _lock then call
+# _get_faiss_index() which also acquires _lock. A plain Lock would deadlock.
+_lock = threading.RLock()
 
 # Storage paths
 _INDEX_PATH = config.VECTOR_DB_DIR / "faiss_index.bin"

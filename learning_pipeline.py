@@ -31,7 +31,7 @@ _ANALYSIS_PROMPT = """You are a sales intelligence analyzer for a Hero two-wheel
 
 Analyze this call transcript and extract the following in JSON format:
 
-{
+{{
   "customer_intent": "what the customer wants (e.g., buy bike, compare models, check price, test ride, service)",
   "interested_model": "specific Hero model mentioned (or 'unknown')",
   "objections": ["list of objections raised (e.g., 'price too high', 'better mileage in TVS', 'need to think')"],
@@ -45,7 +45,7 @@ Analyze this call transcript and extract the following in JSON format:
   "key_learning": "one sentence about what we learned from this call that can help future calls",
   "successful_technique": "what sales technique worked well in this call (or 'none')",
   "failed_technique": "what approach did not work (or 'none')"
-}
+}}
 
 IMPORTANT:
 - Return ONLY valid JSON, no extra text
