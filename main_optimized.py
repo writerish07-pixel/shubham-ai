@@ -379,10 +379,11 @@ async def handle_gather(call_sid: str, request: Request):
                 voice_text = re.sub(r"\{[\s\S]*?\}", "", ai_reply).strip()
             if not voice_text:
                 voice_text = "Ji, samajh rahi hoon. Thoda aur detail dein?"
-                # 🔥 FIX: Record fallback in history so the orphaned thread
-                # (still running conv.chat after timeout) sees history changed
-                # and skips its late assistant append, preventing corruption.
-                conv.add_ai_message(voice_text)
+                # 🔥 FIX: Record fallback in history ONLY on timeout (ai_reply is None).
+                # If conv.chat() completed successfully (ai_reply is not None),
+                # it already appended the assistant response to history.
+                if ai_reply is None:
+                    conv.add_ai_message(voice_text)
 
         print(f"[Gather] [{call_sid}] Priya: {voice_text[:120]}")
 
@@ -643,6 +644,10 @@ async def _process_speech_optimized(buf: bytes, call_sid: str, stream_sid: str, 
             voice_text = re.sub(r"\{.*", "", ai_reply, flags=re.DOTALL).strip() if ai_reply else ""
             if not voice_text:
                 voice_text = "Ji, samajh rahi hoon. Thoda detail dein?"
+                # 🔥 FIX: Record fallback on timeout so orphaned thread's
+                # late append is blocked by the history length guard.
+                if ai_reply is None:
+                    conv.add_ai_message(voice_text)
 
         print(f"[Voicebot] Priya: {voice_text[:120]}")
 
