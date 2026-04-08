@@ -25,11 +25,13 @@ INTENTS = {
     },
     "acknowledgement": {
         "patterns": frozenset([
-            "haan", "han", "haa", "ha", "ok", "okay", "theek", "theek hai",
+            "haan", "han", "haa", "ok", "okay", "theek", "theek hai",
             "ji haan", "bilkul", "sahi", "accha", "acha", "hmm", "hm",
             "हाँ", "हां", "ठीक है", "ठीक", "जी", "जी हाँ", "बिल्कुल",
-            "सही", "अच्छा", "हम्म", "ji", "g",
+            "सही", "अच्छा", "हम्म",
         ]),
+        # 🔥 FIX: Removed short patterns ('ha', 'g', 'ji') that cause false-positive
+        # substring matches in words like 'kahan', 'glamour', 'jaipur' etc.
         "response": "Accha ji! Kab showroom aa sakte hain test ride ke liye?"
     },
     "busy": {
@@ -106,18 +108,31 @@ def detect_intent(text: str, lead: dict = None) -> str | None:
     """
     Fast intent matching — O(1) per pattern via set lookup.
     Returns response string if matched, None otherwise.
+    
+    🔥 FIX: Uses word-boundary matching for short patterns (len < 4)
+    to prevent false-positive substring matches.
+    🔥 FIX: Uses 'break' instead of 'return None' for acknowledgement
+    guard so other intents can still be checked.
     """
     text_lower = text.lower().strip()
     if len(text_lower) < 2:
         return None
     
     has_name = lead and lead.get("name", "").strip()
+    # 🔥 FIX: Pre-split words for word-boundary matching of short patterns
+    words = set(text_lower.split())
     
     for intent_name, data in INTENTS.items():
         for pattern in data["patterns"]:
-            if pattern in text_lower:
+            # 🔥 FIX: Short patterns use exact word match to avoid
+            # false positives (e.g. 'han' in 'kahan')
+            if len(pattern) < 4:
+                matched = pattern in words
+            else:
+                matched = pattern in text_lower
+            if matched:
                 if intent_name == "acknowledgement" and not has_name:
-                    return None
+                    break  # 🔥 FIX: Skip acknowledgement, continue checking others
                 print(f"[Intent] Matched '{intent_name}' for: '{text[:50]}'")
                 return data["response"]
     return None

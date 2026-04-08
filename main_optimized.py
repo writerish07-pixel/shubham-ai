@@ -397,8 +397,10 @@ async def handle_gather(call_sid: str, request: Request):
         cached_pcm = get_cached_audio(voice_text)
         if cached_pcm:
             print(f"[PhraseCache] Serving cached audio ({len(cached_pcm)} bytes)")
+            # 🔥 FIX: Convert raw PCM to proper WAV with headers before writing
+            wav_bytes = _pcm_to_wav(cached_pcm)
             audio_path = UPLOAD_DIR / f"response_{call_sid}.wav"
-            audio_path.write_bytes(cached_pcm)
+            audio_path.write_bytes(wav_bytes)
             audio_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}"
         else:
             # 🔥 OPTIMIZATION: Async TTS — no thread pool
