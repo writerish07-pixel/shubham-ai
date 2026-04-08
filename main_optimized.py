@@ -499,9 +499,8 @@ async def dashboard(request: Request):
     leads = db.get_all_leads()
     priority = {"hot": 0, "warm": 1, "new": 2, "active": 3, "cold": 4, "dead": 5, "converted": 6}
     leads.sort(key=lambda x: priority.get(x.get("status", "new"), 9))
-    # 🔥 NOTE: _render_dashboard is imported from original main.py
-    # For the optimized version, it remains the same (UI not changed)
-    from main import _render_dashboard
+    # 🔥 FIX: Use local _render_dashboard instead of importing from main.py
+    # Importing main.py triggers side effects (ThreadPoolExecutor, second FastAPI app, etc.)
     return HTMLResponse(_render_dashboard(stats, leads[:100]))
 
 
@@ -713,7 +712,9 @@ async def voicebot_stream(websocket: WebSocket):
                 session = active_calls.get(call_sid)
 
                 if session:
-                    greeting = get_opening_message(session.get("lead"), is_inbound=True)
+                    # 🔥 FIX: Use session's actual is_inbound flag instead of hardcoded True
+                    # so outbound WebSocket calls get personalized greetings
+                    greeting = get_opening_message(session.get("lead"), is_inbound=session.get("is_inbound", True))
                     # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
                     session["conversation"].add_ai_message(greeting)
 
@@ -789,6 +790,267 @@ async def voicebot_stream(websocket: WebSocket):
 
 def _encode_pcm(pcm_bytes: bytes) -> str:
     return base64.b64encode(pcm_bytes).decode("utf-8")
+
+
+# 🔥 FIX: Copied from main.py to avoid importing main.py which triggers
+# module-level side effects (ThreadPoolExecutor, second FastAPI app, duplicate imports)
+def _render_dashboard(stats: dict, leads: list) -> str:
+    badge = {
+        "hot": "🔥", "warm": "🟡", "cold": "❄️",
+        "dead": "☠️", "converted": "✅", "new": "🆕", "active": "📞"
+    }
+    rows = ""
+    for l in leads:
+        s = l.get("status", "new")
+        ic = badge.get(s, "⚪")
+        rows += f"""
+        <tr>
+          <td>{ic} {l.get('name') or '—'}</td>
+          <td>{l.get('mobile','')}</td>
+          <td>{l.get('interested_model') or '—'}</td>
+          <td><span class="badge badge-{s}">{s.upper()}</span></td>
+          <td>{l.get('assigned_to') or '—'}</td>
+          <td>{l.get('next_followup') or '—'}</td>
+          <td>{l.get('call_count',0)}</td>
+          <td>
+            <button onclick="callLead('{l.get('lead_id','')}','{l.get('mobile','')}')"
+                    class="btn-call">📞 Call</button>
+          </td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shubham Motors — AI Agent</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Segoe UI',sans-serif;background:#0d0d1a;color:#e0e0e0;min-height:100vh}}
+.header{{background:linear-gradient(135deg,#1a0a2e,#0d1a3e);padding:18px 30px;border-bottom:2px solid #cc2200;display:flex;align-items:center;justify-content:space-between}}
+.header h1{{color:#fff;font-size:1.4em}}
+.header p{{color:#aaa;font-size:0.8em;margin-top:3px}}
+.live{{background:#1a4a1a;color:#4f4;padding:5px 12px;border-radius:20px;font-size:0.8em;font-weight:bold}}
+.stats{{display:flex;gap:12px;padding:18px 30px;flex-wrap:wrap}}
+.card{{background:#1a1a2e;border-radius:10px;padding:14px 20px;min-width:120px;border:1px solid #2a2a4a;text-align:center}}
+.card .num{{font-size:2em;font-weight:bold}}
+.card .lbl{{color:#888;font-size:0.75em;margin-top:3px}}
+.section{{padding:0 30px 30px}}
+.toolbar{{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}}
+.btn{{background:#cc2200;color:#fff;border:none;padding:9px 16px;border-radius:6px;cursor:pointer;font-size:0.85em;font-weight:600}}
+.btn:hover{{background:#aa1a00}}
+.btn-green{{background:#1a6a1a}}.btn-green:hover{{background:#145014}}
+.btn-purple{{background:#5a1a8a}}.btn-purple:hover{{background:#3a0a6a}}
+.btn-teal{{background:#1a5a5a}}.btn-teal:hover{{background:#0a4040}}
+.btn-call{{background:#1a3a7a;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:0.78em}}
+.btn-call:hover{{background:#0a2a5a}}
+table{{width:100%;border-collapse:collapse;background:#1a1a2e;border-radius:10px;overflow:hidden;font-size:0.88em}}
+th{{background:#252540;color:#999;padding:11px 10px;text-align:left;font-size:0.8em;text-transform:uppercase;letter-spacing:.5px}}
+td{{padding:10px;border-bottom:1px solid #252540}}
+tr:hover{{background:#202035}}
+.badge{{padding:3px 8px;border-radius:12px;font-size:0.75em;font-weight:bold}}
+.badge-hot{{background:#3a0a0a;color:#ff5555}}
+.badge-warm{{background:#3a2a0a;color:#ffaa00}}
+.badge-cold{{background:#0a1a3a;color:#5588ff}}
+.badge-dead{{background:#1a1a1a;color:#777}}
+.badge-converted{{background:#0a2a0a;color:#44cc44}}
+.badge-new{{background:#0a2a3a;color:#44aaff}}
+.badge-active{{background:#1a2a1a;color:#44dd44}}
+.modal{{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:1000;align-items:center;justify-content:center}}
+.modal.open{{display:flex}}
+.mbox{{background:#1a1a2e;border-radius:12px;padding:28px;width:460px;max-width:95vw;border:1px solid #3a3a5a}}
+.mbox h3{{margin-bottom:18px;color:#fff}}
+label{{color:#999;font-size:0.82em;display:block;margin-bottom:4px}}
+input,select,textarea{{width:100%;background:#252540;border:1px solid #3a3a5a;color:#fff;padding:9px 12px;border-radius:6px;margin-bottom:10px;font-size:0.88em}}
+.row{{display:flex;gap:8px}}
+.hint{{color:#666;font-size:0.78em;margin-bottom:12px}}
+#toastContainer{{position:fixed;bottom:20px;right:20px;z-index:9999}}
+.toast{{background:#1a3a1a;color:#4f4;border:1px solid #2a5a2a;padding:12px 20px;border-radius:8px;margin-top:8px;font-size:0.9em}}
+.toast.err{{background:#3a1a1a;color:#f55;border-color:#5a2a2a}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>\U0001f3cd\ufe0f Shubham Motors — AI Voice Agent</h1>
+    <p>Hero MotoCorp Authorized Dealer \u2022 Lal Kothi, Jaipur</p>
+  </div>
+  <div class="live">\U0001f7e2 LIVE</div>
+</div>
+
+<div class="stats">
+  <div class="card"><div class="num">{stats.get('total',0)}</div><div class="lbl">Total Leads</div></div>
+  <div class="card"><div class="num" style="color:#ff5555">{stats.get('hot',0)}</div><div class="lbl">\U0001f525 Hot</div></div>
+  <div class="card"><div class="num" style="color:#ffaa00">{stats.get('warm',0)}</div><div class="lbl">\U0001f7e1 Warm</div></div>
+  <div class="card"><div class="num" style="color:#5588ff">{stats.get('cold',0)}</div><div class="lbl">\u2744\ufe0f Cold</div></div>
+  <div class="card"><div class="num" style="color:#44cc44">{stats.get('converted',0)}</div><div class="lbl">\u2705 Converted</div></div>
+  <div class="card"><div class="num" style="color:#777">{stats.get('dead',0)}</div><div class="lbl">\u2620\ufe0f Dead</div></div>
+  <div class="card"><div class="num" style="color:#44aaff">{stats.get('new',0)}</div><div class="lbl">\U0001f195 New</div></div>
+</div>
+
+<div class="section">
+  <div class="toolbar">
+    <button class="btn" onclick="open_modal('addModal')">\u2795 Add Lead</button>
+    <button class="btn btn-green" onclick="open_modal('importModal')">\U0001f4e5 Import Excel</button>
+    <button class="btn btn-purple" onclick="open_modal('offerModal')">\U0001f381 Upload Offer</button>
+    <button class="btn btn-teal" onclick="location.reload()">\U0001f504 Refresh</button>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Customer</th><th>Mobile</th><th>Interested In</th>
+        <th>Status</th><th>Assigned To</th><th>Next Follow-up</th>
+        <th>Calls</th><th>Action</th>
+      </tr>
+    </thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+
+<!-- Add Lead -->
+<div class="modal" id="addModal">
+  <div class="mbox">
+    <h3>\u2795 Add New Lead</h3>
+    <label>Customer Name</label>
+    <input id="f_name" placeholder="Ramesh Kumar">
+    <label>Mobile Number *</label>
+    <input id="f_mobile" placeholder="9876543210">
+    <label>Interested Model</label>
+    <select id="f_model">
+      <option value="">-- Select Model --</option>
+      <option>Splendor Plus</option><option>HF Deluxe</option>
+      <option>Passion Pro</option><option>Glamour</option>
+      <option>Super Splendor</option><option>Destini 125</option>
+      <option>Maestro Edge 125</option><option>Xoom 110</option>
+      <option>Xtreme 160R</option><option>Xtreme 125R</option>
+      <option>Mavrick 440</option><option>XPulse 200</option>
+    </select>
+    <label>Budget (\u20b9)</label>
+    <input id="f_budget" placeholder="80000">
+    <label>Area / Source</label>
+    <input id="f_area" placeholder="Malviya Nagar / Facebook Ad">
+    <label>Notes</label>
+    <textarea id="f_notes" rows="2" placeholder="Any special requirement..."></textarea>
+    <div class="row">
+      <button class="btn" onclick="addLead()">\U0001f4be Save Lead</button>
+      <button class="btn" style="background:#333" onclick="close_modal('addModal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import -->
+<div class="modal" id="importModal">
+  <div class="mbox">
+    <h3>\U0001f4e5 Import Leads from Excel / CSV</h3>
+    <p class="hint">Columns needed: name, mobile, interested_model, budget, area, source</p>
+    <input type="file" id="importFile" accept=".xlsx,.xls,.csv">
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-green" onclick="importLeads()">Import</button>
+      <button class="btn" style="background:#333" onclick="close_modal('importModal')">Cancel</button>
+    </div>
+    <div id="importResult" style="margin-top:10px;color:#4f4;font-size:0.85em"></div>
+  </div>
+</div>
+
+<!-- Offer Upload -->
+<div class="modal" id="offerModal">
+  <div class="mbox">
+    <h3>\U0001f381 Upload Offer / Scheme</h3>
+    <label>Offer Title *</label>
+    <input id="o_title" placeholder="Diwali Special \u2014 \u20b95,000 off + Free Accessories">
+    <label>Valid Till</label>
+    <input id="o_valid" type="date">
+    <label>Applicable Models (comma separated)</label>
+    <input id="o_models" placeholder="Splendor Plus, HF Deluxe, Glamour">
+    <label>Upload File (PDF / Excel / Image)</label>
+    <input type="file" id="offerFile" accept=".pdf,.xlsx,.xls,.png,.jpg,.jpeg">
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-purple" onclick="uploadOffer()">Upload</button>
+      <button class="btn" style="background:#333" onclick="close_modal('offerModal')">Cancel</button>
+    </div>
+    <div id="offerResult" style="margin-top:10px;color:#4f4;font-size:0.85em"></div>
+  </div>
+</div>
+
+<div id="toastContainer"></div>
+
+<script>
+function open_modal(id)  {{ document.getElementById(id).classList.add('open') }}
+function close_modal(id) {{ document.getElementById(id).classList.remove('open') }}
+
+function toast(msg, err=false) {{
+  const t = document.createElement('div');
+  t.className = 'toast' + (err ? ' err' : '');
+  t.textContent = msg;
+  document.getElementById('toastContainer').appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}}
+
+document.querySelectorAll('.modal').forEach(m =>
+  m.addEventListener('click', e => {{ if (e.target === m) m.classList.remove('open') }})
+);
+
+async function addLead() {{
+  const mobile = document.getElementById('f_mobile').value.trim();
+  if (!mobile) {{ toast('Mobile number is required!', true); return; }}
+  const data = {{
+    name: document.getElementById('f_name').value,
+    mobile,
+    interested_model: document.getElementById('f_model').value,
+    budget: document.getElementById('f_budget').value,
+    area: document.getElementById('f_area').value,
+    notes: document.getElementById('f_notes').value,
+  }};
+  const r = await fetch('/api/leads/add', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(data)
+  }});
+  const res = await r.json();
+  if (res.success) {{ toast('Lead added! ID: ' + res.lead_id); close_modal('addModal'); setTimeout(()=>location.reload(),1500); }}
+  else {{ toast('Error adding lead', true); }}
+}}
+
+async function importLeads() {{
+  const file = document.getElementById('importFile').files[0];
+  if (!file) {{ toast('Please select a file', true); return; }}
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch('/api/leads/import', {{method:'POST', body:fd}});
+  const res = await r.json();
+  document.getElementById('importResult').textContent =
+    `Imported: ${{res.imported}} leads | Skipped: ${{res.skipped}} duplicates`;
+}}
+
+async function callLead(leadId, mobile) {{
+  if (!confirm(`Call ${{mobile}} now?\\nPriya will call this number immediately.`)) return;
+  const r = await fetch('/api/call/make', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{lead_id: leadId, mobile}})
+  }});
+  const res = await r.json();
+  toast(res.message || 'Call initiated!');
+}}
+
+async function uploadOffer() {{
+  const title = document.getElementById('o_title').value.trim();
+  const file  = document.getElementById('offerFile').files[0];
+  if (!title) {{ toast('Offer title is required!', true); return; }}
+  if (!file)  {{ toast('Please select a file', true); return; }}
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('title', title);
+  fd.append('valid_till', document.getElementById('o_valid').value);
+  fd.append('models', document.getElementById('o_models').value);
+  const r = await fetch('/api/offers/upload', {{method:'POST', body:fd}});
+  const res = await r.json();
+  document.getElementById('offerResult').textContent =
+    res.success ? 'Offer uploaded! AI will use this in all calls.' : 'Upload failed';
+}}
+
+setInterval(async () => {{
+  try {{ await fetch('/api/stats'); }} catch(e) {{}}
+}}, 30000);
+</script>
+</body>
+</html>"""
 
 
 # ── ENTRYPOINT ────────────────────────────────────────────────────────────────

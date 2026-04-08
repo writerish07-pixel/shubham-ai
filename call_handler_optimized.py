@@ -107,7 +107,8 @@ async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> by
 
     if not customer_text:
         silence_reply = "Ji? Phir se bol sakte hain?"
-        return synthesize_speech(silence_reply, session["language"])
+        # 🔥 FIX: Use async TTS to avoid blocking the event loop
+        return await synthesize_speech_async(silence_reply, session["language"])
 
     session["language"]  = detected_lang
     session["turn_count"] += 1
