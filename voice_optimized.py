@@ -25,7 +25,8 @@ def _get_client() -> httpx.AsyncClient:
         _http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(8.0, connect=3.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            http2=True,  # 🔥 OPTIMIZATION: HTTP/2 for multiplexed requests
+            # 🔥 FIX: Removed http2=True (requires h2 package not in requirements.txt)
+            # Connection pooling benefits are retained without HTTP/2
         )
     return _http_client
 

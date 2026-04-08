@@ -104,7 +104,8 @@ app = FastAPI(title="Shubham Motors AI Agent (Optimized)", version="3.0.0", life
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 _greeting_pcm_cache = {}
-from state import _pending_outbound
+# 🔥 FIX: Define _pending_outbound inline (state.py doesn't exist in repo)
+_pending_outbound: set[str] = set()
 
 # 🔥 OPTIMIZATION: Thread pool only for CPU-bound work (audio conversion)
 # I/O operations now use async httpx directly
@@ -574,10 +575,9 @@ async def upload_offer(
 
 @app.get("/api/stats")
 async def api_stats():
-    from sheets_manager import get_call_stats
+    # 🔥 FIX: Removed get_call_stats (doesn't exist in sheets_manager)
     stats = get_dashboard_stats()
-    call_stats = get_call_stats()
-    return JSONResponse({**stats, **call_stats})
+    return JSONResponse(stats)
 
 
 @app.get("/api/active-calls")

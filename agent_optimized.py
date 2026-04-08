@@ -19,7 +19,7 @@ from groq import Groq
 
 import config_optimized as config
 from scraper import get_bike_catalog, format_catalog_for_ai
-from sheets_manager import get_active_offers, get_loss_reasons
+from sheets_manager import get_active_offers
 
 log = logging.getLogger("shubham-ai.agent")
 
@@ -110,13 +110,7 @@ def build_system_prompt(lead: dict = None, is_inbound: bool = True) -> str:
                 offer_text += f" (till {o['valid_till']})"
             offer_text += "\n"
 
-    # 🔥 OPTIMIZATION: Only inject loss reasons if they exist and limit to 3
-    loss_data = get_loss_reasons()
     feedback_text = ""
-    if loss_data["competitor_reasons"]:
-        feedback_text = "\n=== COMPETITOR INTEL ===\n"
-        for r in loss_data["competitor_reasons"][-3:]:
-            feedback_text += f"- {r}\n"
 
     lead_context = ""
     if lead:
