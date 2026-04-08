@@ -718,7 +718,10 @@ async def voicebot_stream(websocket: WebSocket):
                     # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
                     session["conversation"].add_ai_message(greeting)
 
-                    pcm = _greeting_pcm_cache.get("data")
+                    # 🔥 FIX: Only use cached PCM if this is a generic inbound greeting
+                    # Outbound calls have personalized greetings that differ from the cached audio
+                    cached_greeting = get_opening_message(None, is_inbound=True)
+                    pcm = _greeting_pcm_cache.get("data") if greeting == cached_greeting else None
                     if not pcm:
                         # 🔥 OPTIMIZATION: Async TTS
                         audio = await synthesize_speech_async(greeting, "hinglish")

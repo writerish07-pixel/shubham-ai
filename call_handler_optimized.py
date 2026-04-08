@@ -203,13 +203,17 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
         f"Temp: {analysis.get('temperature','?')} | Talk ratio: AI={talk_ratio['ai_ratio']:.0%} User={talk_ratio['user_ratio']:.0%}"
     )
 
-    process_call_result(
-        lead_id=lead_id,
-        analysis=analysis,
-        transcript=transcript,
-        duration_sec=actual_dur,
-        direction="inbound" if session.get("is_inbound") else "outbound",
-    )
+    # 🔥 FIX: Wrap in try/except so transcript update below is not skipped on failure
+    try:
+        process_call_result(
+            lead_id=lead_id,
+            analysis=analysis,
+            transcript=transcript,
+            duration_sec=actual_dur,
+            direction="inbound" if session.get("is_inbound") else "outbound",
+        )
+    except Exception as exc:
+        print(f"[CallHandler] process_call_result failed for SID {call_sid}: {exc}")
 
     if lead_id:
         lead = db.get_lead_by_id(lead_id)
