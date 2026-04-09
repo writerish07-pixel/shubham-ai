@@ -592,6 +592,108 @@ async def api_active_calls():
     })
 
 
+# ── SELF-LEARNING ENDPOINTS ──────────────────────────────────────────────────
+
+@app.post("/api/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    doc_type: str = Form("general"),
+):
+    """
+    Upload documents (PDF/JPEG/Excel) for learning.
+
+    The document_learning module extracts text, chunks it, and stores
+    embeddings in the FAISS vector DB. The agent then uses this knowledge
+    via RAG during live calls.
+
+    doc_type: "pricing", "offer", "brochure", "competitor", "general"
+    """
+    if not config.LEARNING_ENABLED:
+        return JSONResponse(
+            {"success": False, "error": "Learning system is disabled"},
+            status_code=400,
+        )
+
+    content = await file.read()
+    if len(content) > config.MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Max size: {config.MAX_UPLOAD_SIZE // (1024*1024)}MB",
+        )
+
+    # Save file to documents directory
+    filepath = config.DOCUMENTS_DIR / file.filename
+    filepath.write_bytes(content)
+
+    # Process document in background (non-blocking)
+    try:
+        from document_learning import ingest_document
+        result = await asyncio.get_running_loop().run_in_executor(
+            _executor,
+            ingest_document,
+            str(filepath),
+            doc_type,
+        )
+        return JSONResponse({
+            "success": True,
+            "filename": file.filename,
+            "doc_type": doc_type,
+            "chunks_stored": result.get("chunks_stored", 0) if result else 0,
+            "message": "Document processed and stored in vector DB for RAG retrieval.",
+        })
+    except Exception as e:
+        print(f"[DocLearning] Error processing {file.filename}: {e}")
+        return JSONResponse(
+            {"success": False, "error": str(e)},
+            status_code=500,
+        )
+
+
+@app.get("/api/learning/status")
+async def learning_status():
+    """Check learning system status — vector DB, stored learnings, etc."""
+    status = {
+        "learning_enabled": config.LEARNING_ENABLED,
+        "vector_db_dir": str(config.VECTOR_DB_DIR),
+        "learnings_file": str(config.LEARNINGS_FILE),
+    }
+
+    # Check if vector DB has data
+    try:
+        from memory_learning import get_stats
+        stats = get_stats()
+        status["vector_db_entries"] = stats.get("total_vectors", 0)
+        status["vector_db_status"] = "active"
+    except Exception as e:
+        status["vector_db_entries"] = 0
+        status["vector_db_status"] = f"error: {e}"
+
+    # Check learnings file
+    try:
+        import json as _json
+        if config.LEARNINGS_FILE.exists():
+            with open(config.LEARNINGS_FILE) as f:
+                learnings = _json.load(f)
+            status["total_learnings"] = len(learnings)
+        else:
+            status["total_learnings"] = 0
+    except Exception:
+        status["total_learnings"] = 0
+
+    return JSONResponse(status)
+
+
+@app.get("/api/intelligence/summary")
+async def intelligence_summary():
+    """Get sales intelligence summary — competitor losses, top reasons, etc."""
+    try:
+        from sales_intelligence import get_loss_summary
+        summary = get_loss_summary()
+        return JSONResponse({"success": True, **summary})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 # ── VOICEBOT WEBSOCKET (OPTIMIZED) ───────────────────────────────────────────
 
 async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket: WebSocket, state: dict):

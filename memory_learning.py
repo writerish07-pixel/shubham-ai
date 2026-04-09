@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 
-import config_learning as config
+import config
 
 log = logging.getLogger("shubham-ai.memory")
 

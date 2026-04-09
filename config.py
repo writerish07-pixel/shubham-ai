@@ -6,10 +6,17 @@ OPTIMIZATIONS:
 - Added GROQ_SMART_MODEL for complex queries
 - Added latency-related configuration constants
 - Added streaming and performance tuning knobs
+
+SELF-LEARNING:
+- Vector DB / FAISS settings for RAG retrieval
+- Document learning settings (chunk size, upload limits)
+- Sales intelligence settings (competitor brands, loss categories)
+- Background learning pipeline toggle
 """
 import os
 import json
 import logging
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -106,6 +113,55 @@ END_OF_SPEECH_SILENCE_MS  = int(os.getenv("END_OF_SPEECH_SILENCE_MS", "600"))
 
 # 🔥 FIX: Minimum audio bytes to consider as valid speech (filters noise)
 MIN_SPEECH_BYTES          = int(os.getenv("MIN_SPEECH_BYTES", "6000"))
+
+
+# ── Self-learning system ─────────────────────────────────────────────────────
+
+# Data directories
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+VECTOR_DB_DIR = DATA_DIR / "vector_db"
+VECTOR_DB_DIR.mkdir(exist_ok=True)
+
+DOCUMENTS_DIR = DATA_DIR / "documents"
+DOCUMENTS_DIR.mkdir(exist_ok=True)
+
+INTELLIGENCE_DIR = DATA_DIR / "intelligence"
+INTELLIGENCE_DIR.mkdir(exist_ok=True)
+
+# Vector DB / Embedding settings
+EMBEDDING_MODEL     = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2").strip()
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "384"))
+
+# RAG retrieval settings
+RAG_TOP_K          = int(os.getenv("RAG_TOP_K", "3"))
+RAG_MIN_SIMILARITY = float(os.getenv("RAG_MIN_SIMILARITY", "0.45"))
+
+# Learning pipeline settings
+LEARNINGS_FILE         = DATA_DIR / "learnings.json"
+OBJECTIONS_FILE        = DATA_DIR / "objections.json"
+COMPETITOR_LOSSES_FILE = INTELLIGENCE_DIR / "competitor_losses.json"
+DEALER_LOSSES_FILE     = INTELLIGENCE_DIR / "dealer_losses.json"
+
+MAX_TRANSCRIPT_LENGTH = int(os.getenv("MAX_TRANSCRIPT_LENGTH", "4000"))
+LEARNING_ENABLED      = os.getenv("LEARNING_ENABLED", "true").strip().lower() == "true"
+
+# Document learning settings
+MAX_UPLOAD_SIZE    = int(os.getenv("MAX_UPLOAD_SIZE", str(10 * 1024 * 1024)))
+DOC_CHUNK_SIZE     = int(os.getenv("DOC_CHUNK_SIZE", "500"))
+DOC_CHUNK_OVERLAP  = int(os.getenv("DOC_CHUNK_OVERLAP", "50"))
+
+# Sales intelligence — competitor brands for detection
+COMPETITOR_BRANDS = [
+    "bajaj", "tvs", "honda", "yamaha", "suzuki", "royal enfield",
+    "ktm", "kawasaki", "bmw", "jawa", "ola", "ather", "revolt",
+]
+
+LOSS_REASON_CATEGORIES = [
+    "price", "mileage", "brand_trust", "availability", "discount",
+    "service", "features", "resale_value", "behavior", "finance", "other",
+]
 
 
 # -- Startup validation -------------------------------------------------------
