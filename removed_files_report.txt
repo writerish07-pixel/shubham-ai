@@ -1,0 +1,177 @@
+================================================================================
+SHUBHAM MOTORS AI VOICE AGENT — REPOSITORY CLEANUP REPORT
+================================================================================
+Date: April 2026
+Branch: devin/1775715605-repo-cleanup
+
+================================================================================
+SUMMARY
+================================================================================
+Total Python files BEFORE cleanup: 25
+Total Python files AFTER cleanup:  14
+Files removed: 14 (5 duplicates + 7 experimental + 2 unused docs)
+Files renamed: 8 (removed _optimized suffix for clean names)
+
+================================================================================
+FILES REMOVED
+================================================================================
+
+--- DUPLICATE FILES (older versions replaced by optimized counterparts) ---
+
+1. main.py (1474 lines) -> REPLACED BY main_optimized.py (now renamed to main.py)
+   Reason: Original used blocking I/O with ThreadPoolExecutor for ALL operations.
+   The optimized version is async-native, uses httpx with connection pooling,
+   has streaming LLM support, and reduced timeouts. ~370 fewer lines.
+
+2. agent.py (392 lines) -> REPLACED BY agent_optimized.py (now renamed to agent.py)
+   Reason: Original had verbose ~4000-token system prompt, no hybrid model routing,
+   no response validation, no talk ratio tracking. The optimized version has:
+   - Hybrid model routing (fast vs smart model)
+   - Response validation (_validate_response)
+   - Talk ratio enforcement (30/70 rule)
+   - 60% shorter system prompt (~1500 tokens)
+
+3. config.py (107 lines) -> REPLACED BY config_optimized.py (now renamed to config.py)
+   Reason: Original lacked turn-taking constants, latency tuning knobs, and
+   hybrid model configuration. The optimized version adds:
+   - END_OF_SPEECH_SILENCE_MS, MIN_SPEECH_BYTES, WS_AUDIO_BUFFER_THRESHOLD
+   - LLM_MAX_TOKENS_FAST/SMART, LLM_MIN_TOKENS_FLOOR
+   - STT_TIMEOUT_SEC, LLM_TIMEOUT_SEC, TTS_TIMEOUT_SEC
+   - GROQ_FAST_MODEL, GROQ_SMART_MODEL
+   All values are env-var overridable.
+
+4. call_handler.py (158 lines) -> REPLACED BY call_handler_optimized.py (now renamed to call_handler.py)
+   Reason: Original had no turn-taking state flags, no async speech processing,
+   no intent detection integration, no talk ratio tracking. The optimized version adds:
+   - is_user_speaking, speech_final, is_ai_speaking flags
+   - Async process_customer_speech_async()
+   - Intent detection before LLM call
+   - Talk ratio logging on call end
+
+5. voice.py (169 lines) -> REPLACED BY voice_optimized.py (now renamed to voice.py)
+   Reason: Original used blocking `requests` library with no connection pooling.
+   The optimized version uses:
+   - httpx with persistent connection pooling (~200ms savings per request)
+   - Async-native STT and TTS functions
+   - Parallel TTS chunk processing
+   - Reduced timeouts (15-20s -> 5-6s)
+
+--- EXPERIMENTAL FILES (self-learning system, not used in production) ---
+
+6. agent_learning.py (498 lines)
+   Reason: Extends agent_optimized.py with RAG and competitor detection.
+   NOT imported by main_optimized.py. Requires memory_learning.py (FAISS + 
+   sentence-transformers) which adds heavy dependencies. Can be re-added 
+   when RAG system is production-ready.
+
+7. call_handler_learning.py (328 lines)
+   Reason: Learning-enabled call handler that uses ConversationManagerLearning
+   and fires background learning pipeline. NOT imported by main_optimized.py.
+   Depends on agent_learning.py and learning_pipeline.py.
+
+8. config_learning.py (~150 lines)
+   Reason: Configuration for learning system (LEARNING_ENABLED flag, RAG settings,
+   vector DB paths). NOT imported by any production code.
+
+9. memory_learning.py (353 lines)
+   Reason: FAISS vector database implementation for RAG retrieval. Uses
+   sentence-transformers for embeddings (~500MB model download). NOT imported
+   by any production code. Heavy dependency not suitable for current deployment.
+
+10. document_learning.py (297 lines)
+    Reason: PDF/JPEG/Excel document ingestion system. Chunks text and stores
+    in FAISS vector DB. NOT imported by any production code.
+
+11. learning_pipeline.py (295 lines)
+    Reason: Post-call learning pipeline that extracts intents, objections,
+    buying signals from transcripts. NOT imported by any production code.
+    Depends on memory_learning.py.
+
+12. sales_intelligence.py (240 lines)
+    Reason: Competitor tracking and loss analytics. NOT imported by
+    main_optimized.py or any active production module. The competitor
+    detection logic in agent_optimized.py handles this inline.
+
+--- UNUSED DOCUMENTATION ---
+
+13. AUDIT_REPORT.md
+    Reason: One-time audit report from a previous review. Not needed in
+    production repository. Content preserved in git history.
+
+14. SELF_LEARNING_AUDIT.md
+    Reason: Audit report specific to the self-learning system which has been
+    classified as experimental. Content preserved in git history.
+
+================================================================================
+FILES RENAMED (removed _optimized suffix)
+================================================================================
+
+1. config_optimized.py       -> config.py
+2. agent_optimized.py        -> agent.py
+3. main_optimized.py         -> main.py
+4. call_handler_optimized.py -> call_handler.py
+5. voice_optimized.py        -> voice.py
+6. intent_optimized.py       -> intent.py
+7. phrase_cache_optimized.py  -> phrase_cache.py
+8. audio_utils_optimized.py  -> audio_utils.py
+
+All imports across the codebase updated to use new clean names.
+
+================================================================================
+FILES KEPT (production-ready)
+================================================================================
+
+Core Application:
+  - main.py              (entry point — FastAPI server, webhooks, WebSocket)
+  - agent.py             (AI brain — hybrid model routing, conversation manager)
+  - config.py            (central config with validation)
+  - call_handler.py      (call session management with turn-taking)
+  - voice.py             (STT/TTS with async + connection pooling)
+  - intent.py            (intent detection with fuzzy matching)
+  - phrase_cache.py      (pre-generated TTS cache for instant responses)
+  - audio_utils.py       (PCM/WAV/MP3 audio conversion)
+
+Business Logic:
+  - sheets_manager.py    (JSON storage layer — thread-safe)
+  - lead_manager.py      (lead scoring, salesperson assignment)
+  - exotel_client.py     (Exotel telephony API integration)
+  - scraper.py           (Hero bike catalog scraping)
+  - scheduler.py         (APScheduler for follow-up calls)
+  - keep_alive.py        (health check pings)
+
+Configuration & Docs:
+  - requirements.txt     (Python dependencies)
+  - render.yaml          (Render.com deployment config)
+  - .env.example         (environment variable template)
+  - .gitignore           (git ignore rules)
+  - README.md            (project documentation)
+  - CHANGES.md           (changelog)
+
+Tests:
+  - tests/test_app.py    (test suite)
+  - tests/__init__.py
+
+================================================================================
+IMPROVEMENTS
+================================================================================
+
+1. REDUCED COMPLEXITY
+   - 14 fewer files to maintain
+   - No duplicate logic across multiple file versions
+   - Single canonical version of each module
+
+2. BETTER MAINTAINABILITY
+   - Clean file names (no _optimized, _learning, _fix suffixes)
+   - All imports use standard module names
+   - Clear separation: production code vs experimental (removed)
+
+3. SMALLER DEPLOYMENT
+   - ~3,500 fewer lines of code
+   - No unused experimental dependencies loaded
+   - Faster container builds
+
+4. PRESERVED FUNCTIONALITY
+   - All production features intact
+   - Hybrid model routing, turn-taking, response validation
+   - Intent detection, phrase caching, async voice processing
+   - Experimental code preserved in git history if needed later

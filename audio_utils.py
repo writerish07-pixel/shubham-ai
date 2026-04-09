@@ -1,5 +1,5 @@
 """
-audio_utils_optimized.py
+audio_utils.py
 
 OPTIMIZATIONS:
 - 🔥 OPTIMIZATION: Lower silence threshold for faster speech detection

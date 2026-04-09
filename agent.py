@@ -1,21 +1,19 @@
 """
 agent.py
 The AI brain — WORLD-CLASS SALES AI with advanced persuasion techniques.
-Builds system prompts, manages conversation, classifies leads, extracts next actions.
-Uses Groq (ultra-fast LLM inference) with full Hero catalog + active offers injected.
 
-TRAINING: This AI is trained with world's best sales techniques:
-- Dale Carnegie principles
-- SPIN selling methodology
-- Challenger Sale approach
-- NLP and psychology-based selling
-- Family profiling for future sales
+OPTIMIZATIONS:
+- 🔥 OPTIMIZATION: System prompt reduced by ~60% — removed verbose examples, kept core rules
+- 🔥 OPTIMIZATION: Hybrid model routing — fast model for simple queries, smart model for complex
+- 🔥 OPTIMIZATION: Streaming LLM responses via Groq streaming API
+- 🔥 OPTIMIZATION: Talk ratio enforcement — AI limited to 30% talk time
+- 🔥 OPTIMIZATION: max_tokens reduced from 80 to 40/60 based on model
+- 🔥 OPTIMIZATION: Temperature reduced from 0.8 to 0.6 for more concise responses
+- 🔥 OPTIMIZATION: Removed debug prints (OPENAI_BASE_URL)
+- 🔥 FIX: Conversation history trimmed to last 6 turns to reduce token count
 """
-
-import json
-import logging
-import re
-from datetime import datetime, timedelta
+import json, re, logging
+from datetime import datetime
 
 from groq import Groq
 
@@ -26,279 +24,326 @@ from sheets_manager import get_active_offers
 log = logging.getLogger("shubham-ai.agent")
 
 
+# 🔥 OPTIMIZATION: Singleton Groq client — avoid re-creating on every call
+_groq_client = None
+
 def _get_groq_client() -> Groq:
-    """Lazy-initialise Groq client so missing key doesn't crash at import time."""
-    if not config.GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY is not configured")
-    return Groq(api_key=config.GROQ_API_KEY)
+    global _groq_client
+    if _groq_client is None:
+        if not config.GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY is not configured")
+        _groq_client = Groq(api_key=config.GROQ_API_KEY)
+    return _groq_client
 
 
-# ── WORLD-CLASS SALES PROMPT ─────────────────────────────────────────────────
+# ── HYBRID MODEL ROUTER ──────────────────────────────────────────────────────
 
-def build_system_prompt(lead: dict = None) -> str:
+# 🔥 OPTIMIZATION: Classify query complexity to route to fast vs smart model
+SIMPLE_PATTERNS = [
+    # Greetings / acknowledgements
+    r"^(namaste|hello|hi|hey|haan|ok|theek|accha|ji|bilkul|sahi)\b",
+    # Short questions
+    r"^(kab|kahan|kitna|kitne|kya|kaun|kyun)\b",
+    # Yes/No
+    r"^(haan|nahi|no|yes|ha|na)\b",
+    # Common intents already handled by intent.py
+    r"(price|daam|kimat|emi|loan|finance|test ride|address|timing|busy|baad)",
+]
+_simple_re = re.compile("|".join(SIMPLE_PATTERNS), re.IGNORECASE)
+
+
+def classify_query_complexity(text: str) -> str:
+    """
+    Classify whether a query needs the fast or smart model.
+    Returns 'fast' or 'smart'.
+    
+    Fast model (llama-3.1-8b-instant): ~100ms inference
+    - Simple acknowledgements, greetings
+    - Short factual questions (price, timing, address)
+    - Yes/no responses
+    
+    Smart model (llama-3.3-70b-versatile): ~300-500ms inference
+    - Complex objection handling
+    - Multi-topic queries
+    - Negotiation / persuasion needed
+    - Long customer messages (>50 chars usually = complex)
+    """
+    text_clean = text.strip().lower()
+    
+    # Short messages are almost always simple
+    if len(text_clean) < 30 and _simple_re.search(text_clean):
+        return "fast"
+    
+    # Long messages likely need smart model
+    if len(text_clean) > 80:
+        return "smart"
+    
+    # Check for complex indicators
+    complex_indicators = [
+        "discount", "competitor", "compare", "problem", "issue",
+        "complaint", "doosri", "dusri", "honda", "bajaj", "tvs",
+        "sochna", "family", "wife", "husband", "loan", "finance",
+        "emi kitni", "exchange", "purani bike",
+    ]
+    for indicator in complex_indicators:
+        if indicator in text_clean:
+            return "smart"
+    
+    return "fast"
+
+
+# ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
+
+# 🔥 OPTIMIZATION: Dramatically shortened system prompt — saves ~2000 tokens per request
+# Original was ~225 lines / ~4000 tokens. This is ~80 lines / ~1500 tokens.
+# Reduced latency: fewer tokens = faster Groq inference
+
+def build_system_prompt(lead: dict = None, is_inbound: bool = True) -> str:
     catalog_text = format_catalog_for_ai(get_bike_catalog())
     offers = get_active_offers()
     offer_text = ""
     if offers:
-        offer_text = "\n=== CURRENT OFFERS & SCHEMES ===\n"
-        for o in offers:
+        offer_text = "\n=== CURRENT OFFERS ===\n"
+        for o in offers[:3]:  # 🔥 OPTIMIZATION: Limit to top 3 offers
             offer_text += f"• {o.get('title','')}: {o.get('description','')}"
             if o.get('valid_till'):
-                offer_text += f" (Valid till {o['valid_till']})"
-            if o.get('models'):
-                offer_text += f" — Applicable on: {o['models']}"
+                offer_text += f" (till {o['valid_till']})"
             offer_text += "\n"
+
+    feedback_text = ""
 
     lead_context = ""
     if lead:
+        call_count = int(lead.get("call_count", 0))
         lead_context = f"""
-=== CUSTOMER HISTORY ===
-Name: {lead.get('name', 'Unknown')}
-Mobile: {lead.get('mobile', 'Unknown')}
-Interested in: {lead.get('interested_model', 'not specified')}
-Budget: {lead.get('budget', 'not mentioned')}
-Previous notes: {lead.get('notes', 'none')}
-Previous calls: {lead.get('call_count', 0)}
-Temperature: {lead.get('temperature', 'warm')}
-Family Info: {lead.get('family_info', 'Not collected yet')}
+=== CUSTOMER ===
+Name: {lead.get('name', 'Unknown')} | Mobile: {lead.get('mobile', '')}
+Interest: {lead.get('interested_model', 'not specified')} | Budget: {lead.get('budget', 'unknown')}
+Calls: {call_count} | Temp: {lead.get('temperature', 'warm')}
+Notes: {(lead.get('notes', '') or '')[:200]}
+"""
+        if call_count >= 1:
+            lead_context += "FOLLOW-UP: Ask if they purchased. If yes from us→congrats. If no→continue sale.\n"
+            last_transcript = lead.get("last_transcript", "")
+            if last_transcript:
+                lead_context += f"Last call summary: {last_transcript[-200:]}\n"
+
+    call_mode = ""
+    if not is_inbound:
+        call_mode = """
+OUTBOUND MODE: You called them. Confirm they can talk. Be direct. Goal: showroom visit or callback time.
 """
 
-    return f"""You are Priya — a FEMALE sales representative. You are a WORLD-CLASS SALESPERSON representing {config.BUSINESS_NAME}, 
-an authorized Hero MotoCorp dealership in {config.BUSINESS_CITY}, Rajasthan.
+    # 🔥 OPTIMIZATION: Compact system prompt — same rules, ~60% fewer tokens
+    return f"""You are Priya — FEMALE sales rep at {config.BUSINESS_NAME}, Hero MotoCorp dealer, {config.BUSINESS_CITY}.
 
-⚠️ CRITICAL: You are a FEMALE. You MUST always speak in FEMALE grammar:
-- Use "hoi" (हूँ) — NOT "hoon" (हूँ) for "I am"
-- Use "karungi" (करूँगी) — NOT "karunga" (करूँगा) for "I will do"
-- Use "bol rahi hoon" (बोल रही हूँ) — NOT "bol raha hoon" (बोल रहा हूँ)
-- Use "dikhati hoon" (दिखाती हूँ) — NOT "dikhata hoon" (दिखाता हूँ)
-- Use "bhejungi" (भेजूँगी) — NOT "bhejuna" (भेजूँगा)
-- Use "sakti hoon" (सकती हूँ) — NOT "sakta hoon" (सकता हूँ)
-- Use feminine verbs throughout — kar rahi, bol rahi, dekh rahi, etc.
+GENDER: Always use FEMALE Hindi grammar (karungi, bol rahi hoon, sakti hoon, bhejungi).
 
-🎯 YOUR MISSION: Convert EVERY call into a SALE or SHOWROOM VISIT. Your target: 70%+ conversion rate.
+⚠️ RESPONSE RULES (CRITICAL):
+- MAX 1-2 sentences, under 40 words
+- ALWAYS complete your sentence — NEVER cut mid-sentence
+- Every response MUST be grammatically complete and natural
+- ONE question per turn only
+- Never list specs/prices on call — "WhatsApp pe bhejti hoon"
+- Never say "main aapko bata sakti hoon" — say it directly
+- Never repeat what customer said — move forward
+- Ask name first, then budget, then suggest models matching budget
+- NEVER offer/match discounts — "Manager se confirm karungi"
+- Use polite, complete Hindi phrases: "Sir aap kaunsi bike dekh rahe hain?" NOT "kaunsi bike"
 
-💰 YOU ARE NOT JUST A TELECALLER — YOU ARE A CLOSER, A CONSULTANT, A TRUSTED ADVISOR.
-
-═══════════════════════════════════════════════════════════════════════════════
-🔥 WORLD'S BEST SALES TECHNIQUES — TRAINED IN:
-═══════════════════════════════════════════════════════════════════════════════
-
-1. DALE CARNEGIE PRINCIPLES:
-   - Make the customer feel important
-   - Be genuinely interested in them as a person
-   - Remember and use their name
-   - Listen more, talk less
-   - Make the other person feel like it's their idea
-
-2. SPIN SELLING METHODOLOGY:
-   - S - SITUATION: Understand their current situation
-   - P - PROBLEM: Identify pain points with current transport
-   - I - IMPLICATION: Show consequences of the problem
-   - N - NEED-PAYOFF: Get them to imagine the solution
-
-3. CHALLENGER SALE APPROACH:
-   - Teach: Educate customer about bike value
-   - Tailor: Customize to their specific needs
-   - Take Control: Guide the conversation to close
-
-4. FAMILY PROFILING FOR FUTURE SALES (CRITICAL!):
-   Ask about family members for upselling opportunities:
-   - "Aapke ghar mein aur kaunsa member hai?"
-   - "Pati/Patni ka bike ka demand hai kya?"
-   - "Bacchon ki age kya hai? 18+ ho gaya to unke liye bhi Hero la sakte hain!"
-   - "Aapke father ji ko bike chahiye kya? Unke liye splendor best rehta hai!"
-   - "Business partner ke liye commuter chahiye?"
-   
-   🎯 UPSELLING GOLDEN RULES:
-   - If customer has spouse → Suggest spouse's bike separately
-   - If customer has adult children (18+) → "Beta/beti ke liye bhi ek bike rakh sakte hain!"
-   - If customer has teenage kids → "Jab 18+ ho jaye, toh college ke liye accessoria offer karenge!"
-   - If customer is business owner → Suggest commercial bikes for delivery
-   - If customer is employed → Suggest commute bikes with good mileage
-
-5. RAPPORT BUILDING TECHNIQUES:
-   - Find common ground (same city, area, etc.)
-   - Use their name frequently
-   - Show genuine care about their needs
-   - Be friendly like a trusted neighbor
-
-═══════════════════════════════════════════════════════════════════════════════
-🎯 CONVERSATION FLOW (Follow This Strictly):
-═══════════════════════════════════════════════════════════════════════════════
-
-STEP 1: WARM GREETING + RAPPORT (15 seconds)
-- "Namaste {name} ji! Priya bol rahi hoon, Shubham Motors se, Jaipur!" ✓ CORRECT
-- Use their name to personalize
-- Show genuine excitement: "Aapke call pe bahut khushi hui!" ✓ CORRECT
-
-STEP 2: SITUATION DISCOVERY (30 seconds) — SPIN SELLING 'S'
-- "Aap currently bike use karte hain kya?"
-- "Aapka daily commute kaisa hai?"
-- "Family mein kaun kaun hai?"
-- � ключ: Build complete profile!
-
-STEP 3: PROBLEM IDENTIFICATION (30 seconds) — SPIN SELLING 'P'
-- "Current bike mein kya problem hai?"
-- "Service ka kharcha zyada ho raha hai?"
-- "Petrol ya budget concern hai?"
-
-STEP 4: IMPLICATION BUILDING (20 seconds) — SPIN SELLING 'I'
-- "Ye problem aapke din mein kitna affect karti hai?"
-- "Har month kitna extra kharcha ho raha hai?"
-- "Family ke liye convenience kaisi hai abhi?"
-
-STEP 5: NEED-PAYOFF + SOLUTION (60 seconds) — SPIN SELLING 'N'
-- "Agar main aapko bike dikhau jo sirf ₹2,000/month EMI mein mile — Interest nahi lagega!"
-- "Zero downpayment, zero processing fee — Limited time offer!"
-- "Test ride free hai, bilkul zero commitment!"
-
-STEP 6: HANDLE OBJECTIONS (Use Psychology!) (30 seconds)
-- "Price zyada hai" → Show EMI + value, not just price
-- "Sochna hai" → Create urgency + get WhatsApp
-- "Doosre dekh raha hoon" → Differentiate with trust + warranty (use "dekh rahe hain" for customer)
-- "Family se baat karni hai" → "Bilkul! Unko bhi call pe le sakte hain, main sab explain karungi!"
-
-STEP 7: 🎯 THE CLOSE — NEVER LEAVE WITHOUT IT!
-- "Aaj hi test ride book karte hain?"
-- "Kab free hain aap?"
-- "Just ₹1,000 se booking kar sakte hain, refundable hai!"
-
-STEP 8: 🎁 FAMILY UPSELL (Before Ending!)
-- "Aur ek baat, aapke pati/patni ke liye bhi Hero ka option hai — alag discount!"
-- "Bacchon ke liye future ke liye rakho? College offer chal raha hai!"
-
-STEP 9: GET COMMITMENT
-- Always end with: "Pakka? Aaj hi call karenge?"
-- If they say yes → Confirm exact time
-- If no → Schedule specific follow-up
-
-═══════════════════════════════════════════════════════════════════════════════
-🔥 ADVANCED OBJECTION HANDLING:
-═══════════════════════════════════════════════════════════════════════════════
-
-PRICE OBJECTION:
-❌ Wrong: "Discount de sakte hain"
-✅ Right: "Sir, EMI dekhiye — ₹1,800/month se bike le sakte hain! 5 saal warranty included, zero maintenance cost first year!"
-
-TIME OBJECTION:
-❌ Wrong: "Kab aayenge?"
-✅ Right: "Main aapke liye Saturday-Sunday flexible rakhungi. Aapko convenience batayiye, hum adapt karenge!"
-
-COMPETITOR OBJECTION:
-❌ Wrong: "Woh brand bekar hai"
-✅ Right: "Sir, Hero India's No.1 brand hai! 5 crore customers. Service network sabse strong. Resale value sabse best!"
-
-FAMILY CONSULTATION OBJECTION:
-❌ Wrong: "Accha theek hai"
-✅ Right: "Sir, family ke saath discuss karna zaroori hai! Main WhatsApp par sab details bhejungi, aap unhe share kijiye. Unka feedback lekar hum next call karenge!"
-
-═══════════════════════════════════════════════════════════════════════════════
-📊 LEAD CLASSIFICATION (Your Conversion Depends On This!):
-═══════════════════════════════════════════════════════════════════════════════
-
-🔥 HOT (Ready to Buy NOW):
-- Budget confirmed
-- Model finalized
-- Timeline: This week
-- Action: TRANSFER TO AGENT IMMEDIATELY
-
-🟡 WARM (Interested, Needs Nurturing):
-- Budget discussed
-- Multiple models considered
-- Timeline: 2-4 weeks
-- Action: Get WhatsApp, send info, schedule follow-up
-
-❄️ COLD (Need More Nurturing):
-- Vague interest
-- No budget discussion
-- Timeline: 1-3 months
-- Action: Add to nurturing list, regular follow-ups
-
-☠️ DEAD:
-- Wrong number
-- Not interested
-- "Don't call again"
-- Action: Mark as dead, don't waste time
-
-═══════════════════════════════════════════════════════════════════════════════
-📝 DATA EXTRACTION (After EVERY Call — Don't Miss Anything!):
-═══════════════════════════════════════════════════════════════════════════════
-
-After EVERY customer response, output a JSON block:
-
-{{
-  "customer_name": "Full name from conversation",
-  "age_estimate": "young/middle/senior (estimate if not told)",
-  "occupation": "business/employee/student/housewife/retired/unknown",
-  "family_members": ["self", "spouse", "children_18plus", "children_teen", "parents"],
-  "children_ages": "if any, list ages",
-  "spouse_interest": "interested/not_interested/unknown",
-  "interested_model": "specific model or general",
-  "budget_range": "exact or range mentioned",
-  "current_bike": "if they have one, which model",
-  "bike_usage": "daily_commute/occasional/business/family",
-  "temperature": "hot/warm/cold/dead",
-  "close_reason": "what specifically made them interested",
-  "objection": "if any, what they said",
-  "next_followup_date": "YYYY-MM-DD HH:MM or null",
-  "next_action": "schedule_visit/send_whatsapp/followup_call/transfer_agent/close_dead",
-  "convert_to_sale": true/false,
-  "assign_to_salesperson": true/false (true if HOT),
-  "whatsapp_number": "if got, else empty",
-  "family_upsell_note": "note about family members for future sales",
-  "notes": "full summary including family info gathered"
-}}
+SALES: Build rapport, use customer name, SPIN method. Always end with next step (visit/callback).
+OBJECTIONS: "Price zyada"→EMI. "Sochna hai"→"Kab decide karenge?" "Doosri jagah"→Hero service best.
+LEAD TEMP: Hot=budget+model+this week. Warm=interested. Cold=vague. Dead=not interested.
 
 {catalog_text}
 {offer_text}
+{feedback_text}
 {lead_context}
-
-═══════════════════════════════════════════════════════════════════════════════
-⚡ CRITICAL RULES FOR 70% CONVERSION:
-═══════════════════════════════════════════════════════════════════════════════
-1. NEVER end call without NEXT STEP (appointment or specific follow-up time)
-2. ALWAYS get WhatsApp number for sending photos/video
-3. ALWAYS ask about FAMILY for upselling
-4. ALWAYS create URGENCY (offers are limited!)
-5. ALWAYS offer TEST RIDE (free, no commitment)
-6. If HOT → IMMEDIATELY request to transfer to agent
-7. Be CONFIDENT, not pushy — guide like a friend
-8. Use CUSTOMER'S NAME at least 5 times in conversation
-9. LISTEN more than you speak (80/20 rule)
-10. Every question should bring you closer to the SALE
-
-WORKING HOURS: {config.WORKING_HOURS_START}:00 AM to {config.WORKING_HOURS_END}:00 PM, {', '.join(config.WORKING_DAYS)}
+{call_mode}
+Hours: {config.WORKING_HOURS_START}-{config.WORKING_HOURS_END}, {', '.join(config.WORKING_DAYS[:3])}+
 """
 
 
 # ── CONVERSATION MANAGER ──────────────────────────────────────────────────────
 
 class ConversationManager:
-    """Manages per-call conversation history."""
+    """Manages per-call conversation history with talk ratio tracking."""
     
-    def __init__(self, lead: dict = None):
+    def __init__(self, lead: dict = None, is_inbound: bool = True):
         self.lead = lead
         self.history = []
-        self.system_prompt = build_system_prompt(lead)
+        self.system_prompt = build_system_prompt(lead, is_inbound=is_inbound)
+        # 🔥 OPTIMIZATION: Track talk ratio
+        self.ai_word_count = 0
+        self.user_word_count = 0
     
-    def chat(self, user_message: str) -> str:
-        self.history.append({"role": "user", "content": user_message})
+    def add_exchange(self, user_text: str, ai_text: str):
+        """
+        🔥 FIX: Record a user/AI exchange in history AND word counts.
+        Use this when bypassing chat() (e.g. intent matches, opening messages).
+        """
+        self.history.append({"role": "user", "content": user_text})
+        self.history.append({"role": "assistant", "content": ai_text})
+        self.user_word_count += len(user_text.split())
+        self.ai_word_count += len(ai_text.split())
 
+    def add_ai_message(self, ai_text: str):
+        """
+        🔥 FIX: Record an AI-only message (e.g. opening greeting) with word count.
+        """
+        self.history.append({"role": "assistant", "content": ai_text})
+        self.ai_word_count += len(ai_text.split())
+
+    def chat(self, user_message: str) -> str:
+        """Synchronous chat — uses hybrid model routing."""
+        # 🔥 FIX: Append user message BEFORE the API call so trimmed_history
+        # includes it, but track a rollback index in case of timeout/cancellation.
+        # The caller (_run with timeout) may abandon this thread; if the Groq call
+        # eventually completes after timeout, the assistant response is still
+        # appended here. To prevent that, we use a version counter.
+        self.history.append({"role": "user", "content": user_message})
+        self.user_word_count += len(user_message.split())
+        history_len_before = len(self.history)
+        
+        # 🔥 OPTIMIZATION: Hybrid model routing
+        complexity = classify_query_complexity(user_message)
+        if complexity == "fast":
+            model = config.GROQ_FAST_MODEL
+            max_tokens = config.LLM_MAX_TOKENS_FAST  # 40 tokens
+        else:
+            model = config.GROQ_SMART_MODEL
+            max_tokens = config.LLM_MAX_TOKENS_SMART  # 60 tokens
+        
+        # 🔥 FIX: Talk ratio enforcement with minimum floor
+        # Prevents broken sentences — never go below MIN_TOKENS_FLOOR
+        if self.ai_word_count > 0 and self.user_word_count > 0:
+            ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
+            if ai_ratio > 0.40:  # AI talking more than 40%
+                max_tokens = config.LLM_MIN_TOKENS_FLOOR
+        
         try:
             client = _get_groq_client()
+            # 🔥 OPTIMIZATION: Trim history to last 6 turns to reduce token count
+            trimmed_history = self.history[-6:] if len(self.history) > 6 else self.history
+            
             response = client.chat.completions.create(
-                model=config.GROQ_MODEL,
-                messages=[{"role": "system", "content": self.system_prompt}] + self.history,
-                temperature=0.8,
-                max_tokens=300,
+                model=model,
+                messages=[{"role": "system", "content": self.system_prompt}] + trimmed_history,
+                temperature=0.7,  # 🔥 FIX: Slightly higher temp for natural conversation (was 0.6)
+                max_tokens=max_tokens,
             )
             ai_reply = response.choices[0].message.content
+            
+            # 🔥 FIX: Validate response completeness before returning
+            ai_reply = self._validate_response(ai_reply)
+            
         except Exception as exc:
             log.error("Groq chat failed: %s", exc)
-            ai_reply = "Ji, main samajh rahi hoon. Kya aap thoda aur detail de sakte hain?"
+            ai_reply = "Ji, main samajh rahi hoon. Thoda aur detail dein?"
 
-        self.history.append({"role": "assistant", "content": ai_reply})
+        # 🔥 FIX: Only append assistant response if history hasn't been
+        # modified by the main thread (e.g. via add_exchange recording a
+        # fallback after _run timeout). If another assistant message was
+        # already added for this turn, skip to avoid corrupting history.
+        if len(self.history) == history_len_before:
+            self.history.append({"role": "assistant", "content": ai_reply})
+            self.ai_word_count += len(ai_reply.split())
         return ai_reply
+    
+    @staticmethod
+    def _validate_response(text: str) -> str:
+        """
+        🔥 FIX: Response validator — ensures AI never sends incomplete sentences.
+        Checks for sentence completeness before TTS.
+        If incomplete, attempts to complete or returns a safe fallback.
+        """
+        if not text or not text.strip():
+            return "Ji, main samajh rahi hoon. Aap bataaiye?"
+        
+        text = text.strip()
+        
+        # Remove any trailing incomplete JSON blocks
+        text = re.sub(r'\{[^}]*$', '', text).strip()
+        
+        # If text became empty after JSON removal, return fallback
+        if not text:
+            return "Ji, main samajh rahi hoon. Aap bataaiye?"
+        
+        # Check if response ends mid-word (no punctuation or sentence-ending word)
+        # Hindi sentences typically end with: ?, !, ., hai, hain, hoon, ga, gi, ge, ye, lo, do, na
+        sentence_enders = ('?', '!', '.', '।',
+                          'hai', 'hain', 'hoon', 'ho',
+                          'ga', 'gi', 'ge', 'gaa', 'gii',
+                          'ye', 'lo', 'do', 'na', 'le',
+                          'karein', 'kariye', 'bataaiye', 'dijiye',
+                          'sakte', 'sakti', 'sakta',
+                          'hoon', 'hogi', 'hoga',
+                          'dein', 'lein', 'rahega', 'rahegi',
+                          'karungi', 'deti', 'doongi', 'bhejungi',
+                          'dhanyavaad', 'shukriya')
+        
+        last_word = text.rstrip('?.!।').split()[-1].lower() if text.split() else ''
+        ends_properly = (
+            text[-1] in '?.!।'
+            or last_word in sentence_enders
+            or len(text.split()) >= 8  # At least 8 words is likely a complete thought
+        )
+        
+        if not ends_properly:
+            # Response doesn't end properly — likely broken
+            return text + " — aap bataaiye?"
+        
+        return text
+    
+    def chat_streaming(self, user_message: str):
+        """
+        🔥 OPTIMIZATION: Streaming chat — yields tokens as they arrive from Groq.
+        Caller can start TTS on partial text before full response is ready.
+        """
+        self.history.append({"role": "user", "content": user_message})
+        self.user_word_count += len(user_message.split())
+        
+        complexity = classify_query_complexity(user_message)
+        if complexity == "fast":
+            model = config.GROQ_FAST_MODEL
+            max_tokens = config.LLM_MAX_TOKENS_FAST
+        else:
+            model = config.GROQ_SMART_MODEL
+            max_tokens = config.LLM_MAX_TOKENS_SMART
+        
+        # 🔥 FIX: Talk ratio with minimum floor
+        if self.ai_word_count > 0 and self.user_word_count > 0:
+            ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
+            if ai_ratio > 0.40:
+                max_tokens = config.LLM_MIN_TOKENS_FLOOR
+        
+        try:
+            client = _get_groq_client()
+            trimmed_history = self.history[-6:] if len(self.history) > 6 else self.history
+            
+            stream = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": self.system_prompt}] + trimmed_history,
+                temperature=0.6,
+                max_tokens=max_tokens,
+                stream=True,  # 🔥 OPTIMIZATION: Enable streaming
+            )
+            
+            full_reply = ""
+            for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    full_reply += delta.content
+                    yield delta.content
+            
+            self.history.append({"role": "assistant", "content": full_reply})
+            self.ai_word_count += len(full_reply.split())
+            
+        except Exception as exc:
+            log.error("Groq streaming failed: %s", exc)
+            fallback = "Ji, samajh rahi hoon. Thoda detail dein?"
+            self.history.append({"role": "assistant", "content": fallback})
+            yield fallback
     
     def get_full_transcript(self) -> str:
         lines = []
@@ -307,85 +352,85 @@ class ConversationManager:
             lines.append(f"{role}: {msg['content']}")
         return "\n".join(lines)
     
+    def get_talk_ratio(self) -> dict:
+        """Return current talk ratio stats."""
+        total = self.ai_word_count + self.user_word_count
+        if total == 0:
+            return {"ai_ratio": 0, "user_ratio": 0}
+        return {
+            "ai_ratio": round(self.ai_word_count / total, 2),
+            "user_ratio": round(self.user_word_count / total, 2),
+        }
+    
     def analyze_call(self) -> dict:
-        """Ask Groq to analyze full conversation and extract structured data including family profiling."""
+        """Ask Groq to analyze full conversation and extract structured data."""
         transcript = self.get_full_transcript()
         if not transcript.strip():
             return {}
         
-        prompt = f"""Analyze this sales call transcript from {config.BUSINESS_NAME} and extract EVERY piece of information possible.
+        today = datetime.now().strftime("%Y-%m-%d %A")
+
+        # 🔥 OPTIMIZATION: Shorter analysis prompt — same fields, fewer instructions
+        prompt = f"""Analyze this sales call from {config.BUSINESS_NAME}. TODAY: {today}
 
 TRANSCRIPT:
 {transcript}
 
-Return ONLY valid JSON (no markdown, no explanation). Extract ALL details:
-
+Return ONLY valid JSON:
 {{
-  "customer_name": "full name from conversation",
-  "age_estimate": "young/middle/senior (estimate from voice/context if not told)",
-  "occupation": "business/employee/student/housewife/retired/self_employed/unknown - what do they do for living",
-  "family_members": "list all family members mentioned (spouse, children, parents, etc)",
-  "children_ages": "ages of children if mentioned",
-  "spouse_interest": "did spouse show interest in bike? interested/not_interested/not_mentioned",
-  "whatsapp_number": "WhatsApp number if given, else empty",
-  "interested_model": "specific bike model or general interest",
-  "budget_range": "budget mentioned (exact or range)",
-  "current_bike": "current bike if they have one",
-  "bike_usage": "daily_commute/occasional/business/family/none",
+  "customer_name": "",
+  "whatsapp_number": "",
+  "interested_model": "",
+  "budget_range": "",
   "temperature": "hot/warm/cold/dead",
-  "close_reason": "what specifically interested them most",
-  "objection": "any objection they raised",
-  "next_followup_date": "YYYY-MM-DD HH:MM or null",
+  "objection": "",
+  "next_followup_date": "YYYY-MM-DD HH:MM or null (use 10:00 default, never 00:00)",
   "next_action": "schedule_visit/send_whatsapp/followup_call/transfer_agent/close_dead",
-  "convert_to_sale": true/false,
-  "assign_to_salesperson": true/false,
+  "convert_to_sale": false,
+  "assign_to_salesperson": false,
   "sentiment": "positive/neutral/negative",
   "call_outcome": "interested/not_interested/callback_requested/converted/no_answer/dead",
-  "family_upsell_note": "note about family members for future upselling (spouse bike, children bike, etc)",
-  "notes": "detailed summary including all info gathered about customer and family"
+  "family_upsell_note": "",
+  "notes": "brief summary",
+  "purchase_outcome": "converted/lost_to_codealer/lost_to_competitor/not_purchased/unknown",
+  "competitor_brand": "",
+  "loss_reason": "",
+  "feedback_notes": ""
 }}"""
         
         try:
             client = _get_groq_client()
             r = client.chat.completions.create(
-                model=config.GROQ_MODEL,
+                model=config.GROQ_FAST_MODEL,  # 🔥 OPTIMIZATION: Use fast model for analysis
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=800,
+                max_tokens=400,  # 🔥 OPTIMIZATION: Reduced from 500
             )
             raw = r.choices[0].message.content.strip()
             raw = re.sub(r"```json|```", "", raw).strip()
             return json.loads(raw)
         except Exception as e:
-            log.error("Call analysis failed: %s", e)
+            print(f"[Agent] Call analysis failed: {e}")
             return {"temperature": "warm", "next_action": "followup_call", "notes": "Analysis failed"}
 
 
 def get_opening_message(lead: dict = None, is_inbound: bool = False) -> str:
     """Generate the first thing AI says when call connects."""
+    # 🔥 OPTIMIZATION: Shorter greetings — faster TTS, less latency
     if is_inbound:
-        return (
-            "Namaste! Main Priya bol rahi hoon, Shubham Motors Hero MotoCorp se, Jaipur. "
-            "Aap ka call receive karke bahut khushi hui! Kaise madad kar sakti hoon aapki? "
-            "Koi Hero bike mein interest hai aapka?"
-        )
+        return "Namaste! Main Priya, Shubham Motors se. Kaise madad karoon?"
     
     name = lead.get("name", "") if lead else ""
     model = lead.get("interested_model", "") if lead else ""
-    
+    call_count = int(lead.get("call_count", 0)) if lead else 0
+
+    if call_count >= 1:
+        if name:
+            return f"Namaste {name} ji! Priya Shubham Motors se. Kya bike le li ya abhi soch rahe hain?"
+        return "Namaste! Priya Shubham Motors se. Follow up tha — bike le li ya dekh rahe hain?"
+
     if name and model:
-        return (
-            f"Namaste {name} ji! Main Priya bol rahi hoon Shubham Motors se — "
-            f"aapne {model} ke baare mein interest dikhaya tha. "
-            f"Kya aap abhi baat kar sakte hain? Main aapko kuch special information dena chahti thi!"
-        )
+        return f"Namaste {name} ji! Priya Shubham Motors se — {model} ke liye 1 min baat karein?"
     elif name:
-        return (
-            f"Namaste {name} ji! Main Priya hoon, Shubham Motors Hero MotoCorp, Jaipur se. "
-            f"Aapki Hero bike enquiry ke baare mein baat karna tha — thodi si time hai aapke paas?"
-        )
-    else:
-        return (
-            "Namaste! Main Priya bol rahi hoon Shubham Motors Hero MotoCorp se, Jaipur. "
-            "Aapki bike enquiry ke regarding call kar rahi thi — kya aap abhi baat kar sakte hain?"
-        )
+        return f"Namaste {name} ji! Priya Shubham Motors se. Hero bike ke liye baat kar sakte hain?"
+    return "Namaste! Priya Shubham Motors se. Bike enquiry ke liye call kar rahi thi — free hain?"
