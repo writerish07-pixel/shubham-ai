@@ -596,22 +596,27 @@ async def api_active_calls():
 
 async def _process_speech_optimized(buf: bytes, call_sid: str, stream_sid: str, websocket: WebSocket, state: dict):
     """
-    🔥 OPTIMIZATION: Fully async speech processing pipeline:
+    🔥 FIX: Fully async speech processing pipeline with turn-taking:
     1. PCM → WAV conversion (CPU-bound, thread pool)
     2. Async STT (no thread pool)
-    3. Intent detection (instant, O(1))
+    3. Intent detection (instant, O(1) + fuzzy fallback)
     4. If no intent → Hybrid model LLM (thread pool for sync Groq client)
-    5. Phrase cache check (instant)
-    6. If no cache → Async TTS (no thread pool)
-    7. PCM conversion + send (thread pool for pydub)
+    5. Response validation (ensures complete sentences)
+    6. Phrase cache check (instant)
+    7. If no cache → Async TTS (no thread pool)
+    8. PCM conversion + send (thread pool for pydub)
     """
     session = active_calls.get(call_sid)
     if not session:
         return
-    if len(buf) < 4000:
+    # 🔥 FIX: Minimum speech buffer to filter noise/partial speech
+    if len(buf) < config.MIN_SPEECH_BYTES:
         return
     if _is_silence(buf):
         return
+    
+    # 🔥 FIX: Mark user as no longer speaking (speech processing started)
+    session["is_user_speaking"] = False
 
     try:
         # 1. Convert PCM to WAV (CPU-bound)
@@ -688,6 +693,9 @@ async def voicebot_stream(websocket: WebSocket):
     audio_buffer = b""
     state = {"listen_after": 0.0}
     _busy = [False]
+    # 🔥 FIX: End-of-speech silence detection
+    _last_audio_time = [0.0]  # Timestamp of last non-silence audio chunk
+    _speech_detected = [False]  # Whether any speech has been detected in current buffer
 
     try:
         async for message in websocket.iter_text():
@@ -764,12 +772,33 @@ async def voicebot_stream(websocket: WebSocket):
 
                 chunk = base64.b64decode(payload)
                 audio_buffer += chunk
+                now = time.monotonic()
 
-                # 🔥 OPTIMIZATION: Lower buffer threshold for faster response (was 16000)
-                if len(audio_buffer) >= config.WS_AUDIO_BUFFER_THRESHOLD and not _busy[0]:
+                # 🔥 FIX: End-of-speech detection using silence gap
+                # Check if this chunk contains actual speech (not silence)
+                chunk_is_speech = not _is_silence(chunk, threshold=300)
+                if chunk_is_speech:
+                    _last_audio_time[0] = now
+                    _speech_detected[0] = True
+                    # 🔥 FIX: Mark user as speaking — AI must not respond yet
+                    session = active_calls.get(call_sid)
+                    if session:
+                        session["is_user_speaking"] = True
+
+                # 🔥 FIX: Only process when BOTH conditions are met:
+                # 1. We have enough audio data (buffer threshold)
+                # 2. User has STOPPED speaking (silence gap detected)
+                silence_gap_ms = (now - _last_audio_time[0]) * 1000 if _last_audio_time[0] > 0 else 0
+                has_enough_audio = len(audio_buffer) >= config.WS_AUDIO_BUFFER_THRESHOLD
+                speech_ended = _speech_detected[0] and silence_gap_ms >= config.END_OF_SPEECH_SILENCE_MS
+
+                if has_enough_audio and speech_ended and not _busy[0]:
                     buf = audio_buffer
                     audio_buffer = b""
+                    _speech_detected[0] = False
                     _busy[0] = True
+
+                    print(f"[Voicebot] Speech ended (silence: {silence_gap_ms:.0f}ms, buffer: {len(buf)} bytes)")
 
                     async def handle_speech(b=buf):
                         try:
@@ -778,6 +807,10 @@ async def voicebot_stream(websocket: WebSocket):
                             _busy[0] = False
 
                     asyncio.create_task(handle_speech())
+                
+                # 🔥 FIX: Prevent infinite buffer growth — cap at 5x threshold
+                elif len(audio_buffer) > config.WS_AUDIO_BUFFER_THRESHOLD * 5:
+                    audio_buffer = audio_buffer[-config.WS_AUDIO_BUFFER_THRESHOLD:]
 
             elif event == "stop":
                 print(f"[Voicebot] Stream stopped | SID: {call_sid}")

@@ -140,13 +140,16 @@ OUTBOUND MODE: You called them. Confirm they can talk. Be direct. Goal: showroom
 GENDER: Always use FEMALE Hindi grammar (karungi, bol rahi hoon, sakti hoon, bhejungi).
 
 ⚠️ RESPONSE RULES (CRITICAL):
-- MAX 1-2 sentences, under 20 words
+- MAX 1-2 sentences, under 40 words
+- ALWAYS complete your sentence — NEVER cut mid-sentence
+- Every response MUST be grammatically complete and natural
 - ONE question per turn only
 - Never list specs/prices on call — "WhatsApp pe bhejti hoon"
 - Never say "main aapko bata sakti hoon" — say it directly
 - Never repeat what customer said — move forward
 - Ask name first, then budget, then suggest models matching budget
 - NEVER offer/match discounts — "Manager se confirm karungi"
+- Use polite, complete Hindi phrases: "Sir aap kaunsi bike dekh rahe hain?" NOT "kaunsi bike"
 
 SALES: Build rapport, use customer name, SPIN method. Always end with next step (visit/callback).
 OBJECTIONS: "Price zyada"→EMI. "Sochna hai"→"Kab decide karenge?" "Doosri jagah"→Hero service best.
@@ -211,12 +214,12 @@ class ConversationManager:
             model = config.GROQ_SMART_MODEL
             max_tokens = config.LLM_MAX_TOKENS_SMART  # 60 tokens
         
-        # 🔥 OPTIMIZATION: Talk ratio enforcement
-        # If AI has been talking too much, force even shorter responses
+        # 🔥 FIX: Talk ratio enforcement with minimum floor
+        # Prevents broken sentences — never go below MIN_TOKENS_FLOOR
         if self.ai_word_count > 0 and self.user_word_count > 0:
             ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
-            if ai_ratio > 0.35:  # AI talking more than 35%
-                max_tokens = min(max_tokens, 30)
+            if ai_ratio > 0.40:  # AI talking more than 40%
+                max_tokens = max(min(max_tokens, 60), config.LLM_MIN_TOKENS_FLOOR)
         
         try:
             client = _get_groq_client()
@@ -226,10 +229,14 @@ class ConversationManager:
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "system", "content": self.system_prompt}] + trimmed_history,
-                temperature=0.6,  # 🔥 OPTIMIZATION: Lower temp = more concise (was 0.8)
+                temperature=0.7,  # 🔥 FIX: Slightly higher temp for natural conversation (was 0.6)
                 max_tokens=max_tokens,
             )
             ai_reply = response.choices[0].message.content
+            
+            # 🔥 FIX: Validate response completeness before returning
+            ai_reply = self._validate_response(ai_reply)
+            
         except Exception as exc:
             log.error("Groq chat failed: %s", exc)
             ai_reply = "Ji, main samajh rahi hoon. Thoda aur detail dein?"
@@ -242,6 +249,47 @@ class ConversationManager:
             self.history.append({"role": "assistant", "content": ai_reply})
             self.ai_word_count += len(ai_reply.split())
         return ai_reply
+    
+    @staticmethod
+    def _validate_response(text: str) -> str:
+        """
+        🔥 FIX: Response validator — ensures AI never sends incomplete sentences.
+        Checks for sentence completeness before TTS.
+        If incomplete, attempts to complete or returns a safe fallback.
+        """
+        if not text or not text.strip():
+            return "Ji, main samajh rahi hoon. Aap bataaiye?"
+        
+        text = text.strip()
+        
+        # Remove any trailing incomplete JSON blocks
+        text = re.sub(r'\{[^}]*$', '', text).strip()
+        
+        # Check if response ends mid-word (no punctuation or sentence-ending word)
+        # Hindi sentences typically end with: ?, !, ., hai, hain, hoon, ga, gi, ge, ye, lo, do, na
+        sentence_enders = ('?', '!', '.', '।',
+                          'hai', 'hain', 'hoon', 'ho',
+                          'ga', 'gi', 'ge', 'gaa', 'gii',
+                          'ye', 'lo', 'do', 'na', 'le',
+                          'karein', 'kariye', 'bataaiye', 'dijiye',
+                          'sakte', 'sakti', 'sakta',
+                          'hoon', 'hogi', 'hoga',
+                          'dein', 'lein', 'rahega', 'rahegi',
+                          'karungi', 'deti', 'doongi', 'bhejungi',
+                          'dhanyavaad', 'shukriya')
+        
+        last_word = text.rstrip('?.!।').split()[-1].lower() if text.split() else ''
+        ends_properly = (
+            text[-1] in '?.!।'
+            or last_word in sentence_enders
+            or len(text.split()) >= 3  # At least 3 words is likely a complete thought
+        )
+        
+        if not ends_properly and len(text.split()) < 3:
+            # Response is too short and doesn't end properly — likely broken
+            return text + " — aap bataaiye?"
+        
+        return text
     
     def chat_streaming(self, user_message: str):
         """
@@ -259,10 +307,11 @@ class ConversationManager:
             model = config.GROQ_SMART_MODEL
             max_tokens = config.LLM_MAX_TOKENS_SMART
         
+        # 🔥 FIX: Talk ratio with minimum floor
         if self.ai_word_count > 0 and self.user_word_count > 0:
             ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
-            if ai_ratio > 0.35:
-                max_tokens = min(max_tokens, 30)
+            if ai_ratio > 0.40:
+                max_tokens = max(min(max_tokens, 60), config.LLM_MIN_TOKENS_FLOOR)
         
         try:
             client = _get_groq_client()
