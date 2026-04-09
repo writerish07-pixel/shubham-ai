@@ -219,7 +219,7 @@ class ConversationManager:
         if self.ai_word_count > 0 and self.user_word_count > 0:
             ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
             if ai_ratio > 0.40:  # AI talking more than 40%
-                max_tokens = max(min(max_tokens, 60), config.LLM_MIN_TOKENS_FLOOR)
+                max_tokens = config.LLM_MIN_TOKENS_FLOOR
         
         try:
             client = _get_groq_client()
@@ -286,11 +286,11 @@ class ConversationManager:
         ends_properly = (
             text[-1] in '?.!।'
             or last_word in sentence_enders
-            or len(text.split()) >= 3  # At least 3 words is likely a complete thought
+            or len(text.split()) >= 8  # At least 8 words is likely a complete thought
         )
         
-        if not ends_properly and len(text.split()) < 3:
-            # Response is too short and doesn't end properly — likely broken
+        if not ends_properly:
+            # Response doesn't end properly — likely broken
             return text + " — aap bataaiye?"
         
         return text
@@ -315,7 +315,7 @@ class ConversationManager:
         if self.ai_word_count > 0 and self.user_word_count > 0:
             ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
             if ai_ratio > 0.40:
-                max_tokens = max(min(max_tokens, 60), config.LLM_MIN_TOKENS_FLOOR)
+                max_tokens = config.LLM_MIN_TOKENS_FLOOR
         
         try:
             client = _get_groq_client()
