@@ -1,5 +1,5 @@
 """
-phrase_cache_optimized.py
+phrase_cache.py
 Pre-generates TTS audio for common Priya phrases at startup.
 
 OPTIMIZATIONS:
@@ -10,15 +10,15 @@ OPTIMIZATIONS:
 """
 import logging
 from difflib import SequenceMatcher
-from voice_optimized import synthesize_speech
-from audio_utils_optimized import _mp3_to_pcm
+from voice import synthesize_speech
+from audio_utils import _mp3_to_pcm
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("shubham-ai.phrase_cache")
 
 # 🔥 FIX: Extended cache with ALL intent responses (including new intents) + common AI phrases
 CACHED_PHRASES = [
-    # Intent responses (from intent_optimized.py — must match exactly)
+    # Intent responses (from intent.py — must match exactly)
     "Bahut accha! Aap kab aa rahe hain — aaj ya kal?",
     "Accha ji! Kab showroom aa sakte hain test ride ke liye?",
     "Koi baat nahi! Kab call karoon — aapko kab free rahega?",

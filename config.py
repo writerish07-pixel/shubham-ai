@@ -1,4 +1,12 @@
-"""config.py — Central configuration loader with validation."""
+"""
+config.py — Central configuration loader with validation.
+
+OPTIMIZATIONS:
+- Added GROQ_FAST_MODEL for hybrid model routing (small/fast queries)
+- Added GROQ_SMART_MODEL for complex queries
+- Added latency-related configuration constants
+- Added streaming and performance tuning knobs
+"""
 import os
 import json
 import logging
@@ -15,10 +23,17 @@ EXOTEL_API_TOKEN    = os.getenv("EXOTEL_API_TOKEN", "").strip()
 EXOTEL_ACCOUNT_SID  = os.getenv("EXOTEL_ACCOUNT_SID", "shubhammotors1").strip()
 EXOTEL_PHONE_NUMBER = os.getenv("EXOTEL_PHONE_NUMBER", "+919513886363").strip()
 EXOTEL_SUBDOMAIN    = os.getenv("EXOTEL_SUBDOMAIN", "api.exotel.com").strip()
+EXOTEL_APP_ID       = os.getenv("EXOTEL_APP_ID", "1186396")
 
 # -- AI / ML APIs -------------------------------------------------------------
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "").strip()
+
+# 🔥 OPTIMIZATION: Hybrid model routing — fast model for simple queries, smart model for complex
+GROQ_FAST_MODEL     = os.getenv("GROQ_FAST_MODEL", "llama-3.1-8b-instant").strip()
+GROQ_SMART_MODEL    = os.getenv("GROQ_SMART_MODEL", "llama-3.3-70b-versatile").strip()
+# Keep original for backward compatibility
 GROQ_MODEL          = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+
 DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "").strip()
 SARVAM_API_KEY      = os.getenv("SARVAM_API_KEY", "").strip()
 NGROK_AUTH_TOKEN    = os.getenv("NGROK_AUTH_TOKEN", "").strip()
@@ -60,27 +75,37 @@ SILENCE_TIMEOUT_SECONDS = int(os.getenv("SILENCE_TIMEOUT_SECONDS", "5"))
 PUBLIC_URL              = os.getenv("PUBLIC_URL", "http://localhost:5000").strip()
 PORT                    = int(os.getenv("PORT", "5000"))
 
-# -- Human Agent Transfer -------------------------------------------------------
-# Primary agent for transfer (salesperson)
-PRIMARY_AGENT_NUMBER    = os.getenv("PRIMARY_AGENT_NUMBER", "").strip()
-PRIMARY_AGENT_NAME     = os.getenv("PRIMARY_AGENT_NAME", "Sales Agent").strip()
+# 🔥 OPTIMIZATION: Latency tuning constants
+# Reduced timeouts to fail fast instead of hanging
+STT_TIMEOUT_SEC         = float(os.getenv("STT_TIMEOUT_SEC", "6.0"))
+LLM_TIMEOUT_SEC         = float(os.getenv("LLM_TIMEOUT_SEC", "5.0"))
+TTS_TIMEOUT_SEC         = float(os.getenv("TTS_TIMEOUT_SEC", "5.0"))
+RECORDING_DOWNLOAD_TIMEOUT = float(os.getenv("RECORDING_DOWNLOAD_TIMEOUT", "6.0"))
 
-# Secondary agents (can be rotated)
-AGENT_NUMBERS = []
-for i in range(1, 6):
-    agent_num = (os.getenv(f"AGENT_{i}_NUMBER") or "").strip()
-    agent_name = (os.getenv(f"AGENT_{i}_NAME") or f"Agent {i}").strip()
-    if agent_num:
-        AGENT_NUMBERS.append({"number": agent_num, "name": agent_name})
+# 🔥 FIX: Increased min tokens to prevent incomplete/broken sentences
+# Previous values (40/60) caused mid-sentence cutoffs like "aap konsi bike"
+# New values (80/120) allow complete Hindi sentences while staying brief
+LLM_MAX_TOKENS_FAST     = int(os.getenv("LLM_MAX_TOKENS_FAST", "80"))
+LLM_MAX_TOKENS_SMART    = int(os.getenv("LLM_MAX_TOKENS_SMART", "120"))
 
-# Transfer trigger - customer can say keywords or press a key
-TRANSFER_KEYWORDS = [
-    "transfer", "agent", "manager", "supervisor", "human",
-    "baat karna hai", "agent se baat karni hai", "aadmi se baat karna hai",
-    "madad", "sirf manager"
-]
-# DTMF key for transfer (customer presses this during call)
-TRANSFER_DTMF_KEY = os.getenv("TRANSFER_DTMF_KEY", "0")
+# 🔥 FIX: Minimum tokens floor — talk ratio enforcement cannot reduce below this
+# Prevents broken sentences when AI talk ratio is high
+LLM_MIN_TOKENS_FLOOR    = int(os.getenv("LLM_MIN_TOKENS_FLOOR", "60"))
+
+# 🔥 OPTIMIZATION: Thread pool size for async operations
+THREAD_POOL_SIZE        = int(os.getenv("THREAD_POOL_SIZE", "16"))
+
+# 🔥 FIX: WebSocket audio buffer — increased to collect full utterance before processing
+# Previous value (12000 = ~0.75s) caused AI to respond to partial speech
+# New value (24000 = ~1.5s) ensures user finishes speaking first
+WS_AUDIO_BUFFER_THRESHOLD = int(os.getenv("WS_AUDIO_BUFFER_THRESHOLD", "24000"))
+
+# 🔥 FIX: End-of-speech silence detection (milliseconds)
+# AI waits this long after last audio before considering speech complete
+END_OF_SPEECH_SILENCE_MS  = int(os.getenv("END_OF_SPEECH_SILENCE_MS", "600"))
+
+# 🔥 FIX: Minimum audio bytes to consider as valid speech (filters noise)
+MIN_SPEECH_BYTES          = int(os.getenv("MIN_SPEECH_BYTES", "6000"))
 
 
 # -- Startup validation -------------------------------------------------------
@@ -101,6 +126,4 @@ def validate_config() -> list:
         warnings.append("PUBLIC_URL is localhost -- Exotel webhooks require a public URL (use ngrok)")
     if not SALES_TEAM:
         warnings.append("No salesperson configured -- hot lead assignment disabled")
-    if not PRIMARY_AGENT_NUMBER and not AGENT_NUMBERS:
-        warnings.append("No human agent configured -- transfer to human will not work")
     return warnings

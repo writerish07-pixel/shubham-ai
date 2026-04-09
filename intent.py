@@ -1,5 +1,5 @@
 """
-intent_optimized.py
+intent.py
 Fast intent detection — bypasses Groq for simple/common customer inputs.
 
 OPTIMIZATIONS:
