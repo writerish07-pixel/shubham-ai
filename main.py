@@ -621,8 +621,8 @@ async def upload_document(
             detail=f"File too large. Max size: {config.MAX_UPLOAD_SIZE // (1024*1024)}MB",
         )
 
-    # Save file to documents directory
-    filepath = config.DOCUMENTS_DIR / file.filename
+    # Save file to documents directory (sanitize filename to prevent path traversal)
+    filepath = config.DOCUMENTS_DIR / Path(file.filename).name
     filepath.write_bytes(content)
 
     # Process document in background (non-blocking)
