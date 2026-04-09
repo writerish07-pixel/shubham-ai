@@ -16,25 +16,36 @@ from audio_utils_optimized import _mp3_to_pcm
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("shubham-ai.phrase_cache")
 
-# 🔥 OPTIMIZATION: Extended cache with ALL intent responses + common AI phrases
+# 🔥 FIX: Extended cache with ALL intent responses (including new intents) + common AI phrases
 CACHED_PHRASES = [
-    # Intent responses (from intent_optimized.py)
+    # Intent responses (from intent_optimized.py — must match exactly)
     "Bahut accha! Aap kab aa rahe hain — aaj ya kal?",
     "Accha ji! Kab showroom aa sakte hain test ride ke liye?",
     "Koi baat nahi! Kab call karoon — aapko kab free rahega?",
-    "Lal Kothi Tonk Road, Jaipur. 9 se 7 baje tak khula hai.",
-    "Monday se Saturday, subah 9 se shaam 7 baje tak.",
-    "Test ride free hai! Aap kab aa sakte hain?",
+    "Lal Kothi Tonk Road, Jaipur. Subah 9 se shaam 7 baje tak khula hai.",
+    "Monday se Saturday, subah 9 se shaam 7 baje tak. Aap kab aana chahenge?",
+    "Test ride bilkul free hai! Aap kab aa sakte hain showroom?",
     "Koi baat nahi ji! Zaroorat ho toh call karein. Dhanyavaad!",
     "Bilkul! Kab call karoon — subah ya shaam?",
     "Dhanyavaad ji! Kuch aur madad chahiye toh bataaiye.",
-    "EMI 1,800 se shuru hai! Budget bataaiye, best plan batati hoon.",
+    "EMI sirf 1,800 se shuru hai! Aapka budget bataaiye, best plan WhatsApp pe bhejungi.",
+    # 🔥 FIX: New intent responses (price, mileage, availability, color, exchange, downpayment, whatsapp, greeting)
+    "Sir, konsi bike mein interest hai? Model bataaiye, main best price WhatsApp pe bhej deti hoon.",
+    "Hero bikes ka mileage sabse best hai — 50 se 80 kmpl tak! Konsi bike dekh rahe hain?",
+    "Ji bilkul, ready stock hai showroom mein! Aap kab aa sakte hain dekhne?",
+    "Bahut saare colors available hain! Konsi bike ka color dekhna hai? Showroom mein sab dikha doongi.",
+    "Exchange offer available hai ji! Purani bike ka best price denge. Konsi bike hai aapki abhi?",
+    "Sirf 1,000 rupaye se booking ho jaati hai, wo bhi refundable! Kab book karein?",
+    "Bilkul! Aapka WhatsApp number ye hi hai kya? Main abhi details bhej deti hoon.",
+    "Namaste ji! Main Priya, Shubham Motors se. Kaise madad kar sakti hoon aapki?",
     # Common AI fallback phrases
     "Ji, samajh rahi hoon. Thoda detail dein?",
+    "Ji, main samajh rahi hoon. Aap bataaiye?",
     "Ji? Phir se bol sakte hain?",
     "Main manager se confirm karke bata deti hoon.",
     "WhatsApp pe details bhej deti hoon.",
     "Aapka budget kitna hai ji?",
+    "Ji? Kuch suna nahi — louder bol sakte hain?",
     # Opening greetings
     "Namaste! Main Priya, Shubham Motors se. Kaise madad karoon?",
     "Namaste! Priya Shubham Motors se. Follow up tha — bike le li ya dekh rahe hain?",

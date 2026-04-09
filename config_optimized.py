@@ -82,15 +82,30 @@ LLM_TIMEOUT_SEC         = float(os.getenv("LLM_TIMEOUT_SEC", "5.0"))
 TTS_TIMEOUT_SEC         = float(os.getenv("TTS_TIMEOUT_SEC", "5.0"))
 RECORDING_DOWNLOAD_TIMEOUT = float(os.getenv("RECORDING_DOWNLOAD_TIMEOUT", "6.0"))
 
-# 🔥 OPTIMIZATION: Max response tokens — keep AI responses short for phone calls
-LLM_MAX_TOKENS_FAST     = int(os.getenv("LLM_MAX_TOKENS_FAST", "40"))
-LLM_MAX_TOKENS_SMART    = int(os.getenv("LLM_MAX_TOKENS_SMART", "60"))
+# 🔥 FIX: Increased min tokens to prevent incomplete/broken sentences
+# Previous values (40/60) caused mid-sentence cutoffs like "aap konsi bike"
+# New values (80/120) allow complete Hindi sentences while staying brief
+LLM_MAX_TOKENS_FAST     = int(os.getenv("LLM_MAX_TOKENS_FAST", "80"))
+LLM_MAX_TOKENS_SMART    = int(os.getenv("LLM_MAX_TOKENS_SMART", "120"))
+
+# 🔥 FIX: Minimum tokens floor — talk ratio enforcement cannot reduce below this
+# Prevents broken sentences when AI talk ratio is high
+LLM_MIN_TOKENS_FLOOR    = int(os.getenv("LLM_MIN_TOKENS_FLOOR", "60"))
 
 # 🔥 OPTIMIZATION: Thread pool size for async operations
 THREAD_POOL_SIZE        = int(os.getenv("THREAD_POOL_SIZE", "16"))
 
-# 🔥 OPTIMIZATION: WebSocket audio buffer threshold (bytes) — lower = faster response
-WS_AUDIO_BUFFER_THRESHOLD = int(os.getenv("WS_AUDIO_BUFFER_THRESHOLD", "12000"))
+# 🔥 FIX: WebSocket audio buffer — increased to collect full utterance before processing
+# Previous value (12000 = ~0.75s) caused AI to respond to partial speech
+# New value (24000 = ~1.5s) ensures user finishes speaking first
+WS_AUDIO_BUFFER_THRESHOLD = int(os.getenv("WS_AUDIO_BUFFER_THRESHOLD", "24000"))
+
+# 🔥 FIX: End-of-speech silence detection (milliseconds)
+# AI waits this long after last audio before considering speech complete
+END_OF_SPEECH_SILENCE_MS  = int(os.getenv("END_OF_SPEECH_SILENCE_MS", "600"))
+
+# 🔥 FIX: Minimum audio bytes to consider as valid speech (filters noise)
+MIN_SPEECH_BYTES          = int(os.getenv("MIN_SPEECH_BYTES", "6000"))
 
 
 # -- Startup validation -------------------------------------------------------

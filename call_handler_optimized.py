@@ -51,8 +51,10 @@ def start_call_session(call_sid: str, caller_number: str, lead_id: str = None, d
         "is_inbound":  is_inbound,
         "turn_count":  0,
         "silence_count": 0,
-        # 🔥 OPTIMIZATION: Track interruption state
-        "is_speaking": False,
+        # 🔥 FIX: Turn-taking state flags
+        "is_user_speaking": False,   # True while user audio is being received
+        "speech_final": False,       # True when end-of-speech silence detected
+        "is_ai_speaking": False,     # True while AI response audio is playing
     }
 
     active_calls[call_sid] = session
