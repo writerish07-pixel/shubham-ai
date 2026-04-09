@@ -634,13 +634,20 @@ async def upload_document(
             str(filepath),
             doc_type,
         )
-        return JSONResponse({
-            "success": True,
-            "filename": file.filename,
-            "doc_type": doc_type,
-            "chunks_stored": result.get("chunks_stored", 0) if result else 0,
-            "message": "Document processed and stored in vector DB for RAG retrieval.",
-        })
+        if result and result.get("success"):
+            return JSONResponse({
+                "success": True,
+                "filename": file.filename,
+                "doc_type": doc_type,
+                "chunks_stored": result.get("chunks_stored", 0),
+                "message": "Document processed and stored in vector DB for RAG retrieval.",
+            })
+        else:
+            error_msg = result.get("error", "Unknown processing error") if result else "No result returned"
+            return JSONResponse(
+                {"success": False, "error": error_msg},
+                status_code=400,
+            )
     except Exception as e:
         print(f"[DocLearning] Error processing {file.filename}: {e}")
         return JSONResponse(
