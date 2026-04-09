@@ -11,6 +11,13 @@ OPTIMIZATIONS:
 - 🔥 OPTIMIZATION: Temperature reduced from 0.8 to 0.6 for more concise responses
 - 🔥 OPTIMIZATION: Removed debug prints (OPENAI_BASE_URL)
 - 🔥 FIX: Conversation history trimmed to last 6 turns to reduce token count
+
+SELF-LEARNING:
+- 🔥 RAG injection: retrieves relevant past learnings before generating response
+- 🔥 Sales psychology: scarcity, urgency, social proof, SPIN selling
+- 🔥 Competitor handling: detects and counters competitor mentions in real-time
+- 🔥 Document knowledge: uses pricing/offers from ingested PDFs/images
+- Zero additional latency: RAG retrieval is ~5-20ms (FAISS in-memory)
 """
 import json, re, logging
 from datetime import datetime
@@ -78,17 +85,25 @@ def classify_query_complexity(text: str) -> str:
     if len(text_clean) > 80:
         return "smart"
     
-    # Check for complex indicators
+    # Check for complex indicators (non-brand keywords safe for substring match)
     complex_indicators = [
         "discount", "competitor", "compare", "problem", "issue",
-        "complaint", "doosri", "dusri", "honda", "bajaj", "tvs",
+        "complaint", "doosri", "dusri",
         "sochna", "family", "wife", "husband", "loan", "finance",
         "emi kitni", "exchange", "purani bike",
+        "mehenga", "sasta", "expensive", "cheap", "better", "accha nahi",
+        "khareed liya", "le liya", "bought", "already",
     ]
     for indicator in complex_indicators:
         if indicator in text_clean:
             return "smart"
-    
+
+    # Competitor brand mentions always need smart model for persuasion
+    # Uses word-boundary regex to avoid false positives (e.g. "ola" in "bola")
+    from sales_intelligence import _COMPETITOR_BRAND_RE
+    if _COMPETITOR_BRAND_RE.search(text_clean):
+        return "smart"
+
     return "fast"
 
 
@@ -98,7 +113,12 @@ def classify_query_complexity(text: str) -> str:
 # Original was ~225 lines / ~4000 tokens. This is ~80 lines / ~1500 tokens.
 # Reduced latency: fewer tokens = faster Groq inference
 
-def build_system_prompt(lead: dict = None, is_inbound: bool = True) -> str:
+def build_system_prompt(lead: dict = None, is_inbound: bool = True,
+                        rag_context: str = "") -> str:
+    """
+    Build system prompt with optional RAG context injection and sales psychology.
+    RAG context is injected per-turn when relevant past learnings exist.
+    """
     catalog_text = format_catalog_for_ai(get_bike_catalog())
     offers = get_active_offers()
     offer_text = ""
@@ -109,8 +129,6 @@ def build_system_prompt(lead: dict = None, is_inbound: bool = True) -> str:
             if o.get('valid_till'):
                 offer_text += f" (till {o['valid_till']})"
             offer_text += "\n"
-
-    feedback_text = ""
 
     lead_context = ""
     if lead:
@@ -130,17 +148,25 @@ Notes: {(lead.get('notes', '') or '')[:200]}
 
     call_mode = ""
     if not is_inbound:
-        call_mode = """
-OUTBOUND MODE: You called them. Confirm they can talk. Be direct. Goal: showroom visit or callback time.
+        call_mode = (
+            "\nOUTBOUND MODE: You called them. Confirm they can talk. "
+            "Be direct. Goal: showroom visit or callback time.\n"
+        )
+
+    # RAG context block (injected per-turn when relevant learnings exist)
+    rag_block = ""
+    if rag_context:
+        rag_block = f"""
+=== PAST LEARNINGS (use these to give better answers) ===
+{rag_context}
 """
 
-    # 🔥 OPTIMIZATION: Compact system prompt — same rules, ~60% fewer tokens
     return f"""You are Priya — FEMALE sales rep at {config.BUSINESS_NAME}, Hero MotoCorp dealer, {config.BUSINESS_CITY}.
 
 GENDER: Always use FEMALE Hindi grammar (karungi, bol rahi hoon, sakti hoon, bhejungi).
 
-⚠️ RESPONSE RULES (CRITICAL):
-- MAX 1-2 sentences, under 40 words
+=== RESPONSE RULES (CRITICAL — NEVER BREAK) ===
+- MAX 1-2 sentences, under 20 words
 - ALWAYS complete your sentence — NEVER cut mid-sentence
 - Every response MUST be grammatically complete and natural
 - ONE question per turn only
@@ -149,15 +175,41 @@ GENDER: Always use FEMALE Hindi grammar (karungi, bol rahi hoon, sakti hoon, bhe
 - Never repeat what customer said — move forward
 - Ask name first, then budget, then suggest models matching budget
 - NEVER offer/match discounts — "Manager se confirm karungi"
-- Use polite, complete Hindi phrases: "Sir aap kaunsi bike dekh rahe hain?" NOT "kaunsi bike"
 
-SALES: Build rapport, use customer name, SPIN method. Always end with next step (visit/callback).
-OBJECTIONS: "Price zyada"→EMI. "Sochna hai"→"Kab decide karenge?" "Doosri jagah"→Hero service best.
+=== 30/70 TALK RATIO (STRICT) ===
+- You speak MAX 30% of conversation
+- Customer speaks 70%
+- Ask SHORT questions to keep customer talking
+- If you've been talking too much, respond with ONLY a question
+
+=== SALES PSYCHOLOGY (USE THESE TECHNIQUES) ===
+1. SCARCITY: "Yeh offer sirf is mahine hai" / "Stock limited hai"
+2. URGENCY: "Aaj hi scheme end ho rahi hai" / "Kal se price badh jayega"
+3. SOCIAL PROOF: "Iss mahine 50+ Splendor sell hue" / "Sabse popular model"
+4. RECIPROCITY: Offer free test ride, free servicing info
+5. SPIN SELLING: Situation→Problem→Implication→Need-Payoff
+6. ASSUMPTIVE CLOSE: "Kab aa rahe hain test ride ke liye?" (assume they'll come)
+
+=== COMPETITOR HANDLING (IMPORTANT) ===
+- If customer mentions Honda/Bajaj/TVS/Yamaha: "Hero ki service network sabse badi hai"
+- If customer bought from competitor: Ask WHY politely, note reason
+- If customer went to another dealer: Ask "kya offer mila?" — we can match service
+- NEVER badmouth competitors — highlight Hero's strengths instead
+- Key advantages: Mileage king, lowest maintenance, best resale, #1 brand
+
+=== OBJECTION HANDLING ===
+- "Price zyada hai" → "EMI sirf ₹1800/month! Budget kitna hai?"
+- "Sochna padega" → "Bilkul! Kab tak decide karenge? Main note kar leti hoon"
+- "Doosri company dekh rahe" → "Hero ki mileage aur resale best hai. Compare karein!"
+- "Abhi nahi" → "Koi baat nahi, kab call karoon? Scheme miss na ho jaye"
+- "Already bought" → "Congratulations! Kahan se liya? Hum service offer kar sakte hain"
+
+SALES: Build rapport, use customer name. Always end with next step (visit/callback).
 LEAD TEMP: Hot=budget+model+this week. Warm=interested. Cold=vague. Dead=not interested.
 
 {catalog_text}
 {offer_text}
-{feedback_text}
+{rag_block}
 {lead_context}
 {call_mode}
 Hours: {config.WORKING_HOURS_START}-{config.WORKING_HOURS_END}, {', '.join(config.WORKING_DAYS[:3])}+
@@ -167,15 +219,21 @@ Hours: {config.WORKING_HOURS_START}-{config.WORKING_HOURS_END}, {', '.join(confi
 # ── CONVERSATION MANAGER ──────────────────────────────────────────────────────
 
 class ConversationManager:
-    """Manages per-call conversation history with talk ratio tracking."""
-    
+    """Manages per-call conversation history with talk ratio tracking and RAG."""
+
     def __init__(self, lead: dict = None, is_inbound: bool = True):
         self.lead = lead
-        self.history = []
-        self.system_prompt = build_system_prompt(lead, is_inbound=is_inbound)
-        # 🔥 OPTIMIZATION: Track talk ratio
+        self.is_inbound = is_inbound
+        self.history: list[dict] = []
+        # Base system prompt (without RAG — RAG context injected per-turn)
+        self._base_system_prompt = build_system_prompt(lead, is_inbound=is_inbound)
+        # Keep .system_prompt for backward compat (streaming path uses it)
+        self.system_prompt = self._base_system_prompt
+        # Track talk ratio
         self.ai_word_count = 0
         self.user_word_count = 0
+        # Track competitor mentions for sales intelligence
+        self.competitor_mentions: list[dict] = []
     
     def add_exchange(self, user_text: str, ai_text: str):
         """
@@ -195,56 +253,82 @@ class ConversationManager:
         self.ai_word_count += len(ai_text.split())
 
     def chat(self, user_message: str) -> str:
-        """Synchronous chat — uses hybrid model routing."""
-        # 🔥 FIX: Append user message BEFORE the API call so trimmed_history
-        # includes it, but track a rollback index in case of timeout/cancellation.
-        # The caller (_run with timeout) may abandon this thread; if the Groq call
-        # eventually completes after timeout, the assistant response is still
-        # appended here. To prevent that, we use a version counter.
+        """
+        Synchronous chat with RAG context injection.
+
+        Before generating a response:
+        1. Detects competitor mentions for sales intelligence
+        2. Retrieves relevant past learnings from vector DB (~5-20ms)
+        3. Injects RAG context into system prompt
+        4. Enforces strict 30/70 talk ratio
+        """
         self.history.append({"role": "user", "content": user_message})
         self.user_word_count += len(user_message.split())
         history_len_before = len(self.history)
-        
-        # 🔥 OPTIMIZATION: Hybrid model routing
+
+        # Real-time competitor detection
+        try:
+            from sales_intelligence import detect_competitor_mention
+            competitor = detect_competitor_mention(user_message)
+            if competitor:
+                self.competitor_mentions.append(competitor)
+                log.info("Competitor detected: %s", competitor["brand"])
+        except Exception:
+            pass
+
+        # RAG retrieval — fetch relevant past learnings (~5-20ms)
+        rag_context = ""
+        try:
+            from memory_learning import get_relevant_context
+            rag_context = get_relevant_context(user_message, max_chars=600)
+            if rag_context:
+                log.info("RAG context injected (%d chars)", len(rag_context))
+        except Exception as e:
+            log.warning("RAG retrieval failed (non-blocking): %s", e)
+
+        # Build system prompt with RAG context (or use base if no RAG)
+        system_prompt = self._base_system_prompt
+        if rag_context:
+            system_prompt = build_system_prompt(
+                self.lead, is_inbound=self.is_inbound, rag_context=rag_context
+            )
+
+        # Hybrid model routing
         complexity = classify_query_complexity(user_message)
         if complexity == "fast":
             model = config.GROQ_FAST_MODEL
-            max_tokens = config.LLM_MAX_TOKENS_FAST  # 40 tokens
+            max_tokens = config.LLM_MAX_TOKENS_FAST
         else:
             model = config.GROQ_SMART_MODEL
-            max_tokens = config.LLM_MAX_TOKENS_SMART  # 60 tokens
-        
-        # 🔥 FIX: Talk ratio enforcement with minimum floor
-        # Prevents broken sentences — never go below MIN_TOKENS_FLOOR
+            max_tokens = config.LLM_MAX_TOKENS_SMART
+
+        # Strict 30/70 talk ratio enforcement
         if self.ai_word_count > 0 and self.user_word_count > 0:
             ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
-            if ai_ratio > 0.40:  # AI talking more than 40%
-                max_tokens = config.LLM_MIN_TOKENS_FLOOR
-        
+            if ai_ratio > 0.35:
+                max_tokens = min(max_tokens, config.LLM_MIN_TOKENS_FLOOR)
+                log.info("Talk ratio high (%.0f%%) — forcing shorter response", ai_ratio * 100)
+
         try:
             client = _get_groq_client()
-            # 🔥 OPTIMIZATION: Trim history to last 6 turns to reduce token count
             trimmed_history = self.history[-6:] if len(self.history) > 6 else self.history
-            
+
             response = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": self.system_prompt}] + trimmed_history,
-                temperature=0.7,  # 🔥 FIX: Slightly higher temp for natural conversation (was 0.6)
+                messages=[{"role": "system", "content": system_prompt}] + trimmed_history,
+                temperature=0.7,
                 max_tokens=max_tokens,
             )
             ai_reply = response.choices[0].message.content
-            
-            # 🔥 FIX: Validate response completeness before returning
+
+            # Validate response completeness before returning
             ai_reply = self._validate_response(ai_reply)
-            
+
         except Exception as exc:
             log.error("Groq chat failed: %s", exc)
             ai_reply = "Ji, main samajh rahi hoon. Thoda aur detail dein?"
 
-        # 🔥 FIX: Only append assistant response if history hasn't been
-        # modified by the main thread (e.g. via add_exchange recording a
-        # fallback after _run timeout). If another assistant message was
-        # already added for this turn, skip to avoid corrupting history.
+        # Only append if history hasn't been modified by timeout fallback
         if len(self.history) == history_len_before:
             self.history.append({"role": "assistant", "content": ai_reply})
             self.ai_word_count += len(ai_reply.split())
@@ -297,12 +381,25 @@ class ConversationManager:
     
     def chat_streaming(self, user_message: str):
         """
-        🔥 OPTIMIZATION: Streaming chat — yields tokens as they arrive from Groq.
-        Caller can start TTS on partial text before full response is ready.
+        Streaming chat with RAG context — yields tokens as they arrive.
         """
         self.history.append({"role": "user", "content": user_message})
         self.user_word_count += len(user_message.split())
-        
+
+        # RAG retrieval
+        rag_context = ""
+        try:
+            from memory_learning import get_relevant_context
+            rag_context = get_relevant_context(user_message, max_chars=600)
+        except Exception:
+            pass
+
+        system_prompt = self._base_system_prompt
+        if rag_context:
+            system_prompt = build_system_prompt(
+                self.lead, is_inbound=self.is_inbound, rag_context=rag_context
+            )
+
         complexity = classify_query_complexity(user_message)
         if complexity == "fast":
             model = config.GROQ_FAST_MODEL
@@ -310,35 +407,34 @@ class ConversationManager:
         else:
             model = config.GROQ_SMART_MODEL
             max_tokens = config.LLM_MAX_TOKENS_SMART
-        
-        # 🔥 FIX: Talk ratio with minimum floor
+
         if self.ai_word_count > 0 and self.user_word_count > 0:
             ai_ratio = self.ai_word_count / (self.ai_word_count + self.user_word_count)
-            if ai_ratio > 0.40:
-                max_tokens = config.LLM_MIN_TOKENS_FLOOR
-        
+            if ai_ratio > 0.35:
+                max_tokens = min(max_tokens, config.LLM_MIN_TOKENS_FLOOR)
+
         try:
             client = _get_groq_client()
             trimmed_history = self.history[-6:] if len(self.history) > 6 else self.history
-            
+
             stream = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": self.system_prompt}] + trimmed_history,
+                messages=[{"role": "system", "content": system_prompt}] + trimmed_history,
                 temperature=0.6,
                 max_tokens=max_tokens,
-                stream=True,  # 🔥 OPTIMIZATION: Enable streaming
+                stream=True,
             )
-            
+
             full_reply = ""
             for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta.content:
                     full_reply += delta.content
                     yield delta.content
-            
+
             self.history.append({"role": "assistant", "content": full_reply})
             self.ai_word_count += len(full_reply.split())
-            
+
         except Exception as exc:
             log.error("Groq streaming failed: %s", exc)
             fallback = "Ji, samajh rahi hoon. Thoda detail dein?"

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import config_learning as config
+import config
 
 log = logging.getLogger("shubham-ai.intelligence")
 

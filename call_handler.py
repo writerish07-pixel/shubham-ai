@@ -8,13 +8,24 @@ OPTIMIZATIONS:
 - 🔥 OPTIMIZATION: Async-native audio processing (no thread pool)
 - 🔥 OPTIMIZATION: Talk ratio tracking per session
 - 🔥 FIX: process_customer_speech now uses async pipeline
+
+SELF-LEARNING:
+- 🔥 Fires async learning pipeline after every call ends
+- 🔥 Zero impact on webhook response time (background task)
 """
-import time, re
+import asyncio
+import logging
+import time
+import re
 from datetime import datetime
 from typing import Dict
+
+import config
 from agent import ConversationManager, get_opening_message
 from voice import transcribe_audio, synthesize_speech, synthesize_speech_async, transcribe_audio_async
 import sheets_manager as db
+
+log = logging.getLogger("shubham-ai.call-handler")
 
 # In-memory store of active calls: call_sid → session data
 active_calls: Dict[str, dict] = {}
@@ -58,9 +69,9 @@ def start_call_session(call_sid: str, caller_number: str, lead_id: str = None, d
     }
 
     active_calls[call_sid] = session
-    print(
-        f"[CallHandler] Session started | SID: {call_sid} | "
-        f"Lead: {lead_id} | Inbound: {is_inbound}"
+    log.info(
+        "Session started | SID: %s | Lead: %s | Inbound: %s",
+        call_sid, lead_id, is_inbound,
     )
     return session
 
@@ -77,7 +88,7 @@ def get_opening_audio(call_sid: str) -> bytes:
     is_inbound = session.get("is_inbound", False)
 
     opening_text = get_opening_message(lead, is_inbound=is_inbound)
-    print(f"[CallHandler] Opening text: {opening_text[:120]}")
+    log.info("Opening text: %s", opening_text[:120])
 
     # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
     session["conversation"].add_ai_message(opening_text)
@@ -86,9 +97,9 @@ def get_opening_audio(call_sid: str) -> bytes:
     audio = synthesize_speech(opening_text, "hinglish")
 
     if not audio:
-        print("[CallHandler] synthesize_speech returned empty bytes")
+        log.warning("synthesize_speech returned empty bytes")
     else:
-        print(f"[CallHandler] Opening audio: {len(audio)} bytes")
+        log.info("Opening audio: %d bytes", len(audio))
 
     return audio
 
@@ -115,18 +126,18 @@ async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> by
     session["language"]  = detected_lang
     session["turn_count"] += 1
 
-    print(f"[CallHandler] [{call_sid}] Customer: {customer_text}")
+    log.info("[%s] Customer: %s", call_sid, customer_text)
 
     # 2. Try intent detection first (instant, no API call)
     from intent import detect_intent
     intent_response = detect_intent(customer_text, lead=session.get("lead"))
-    
+
     if intent_response:
         voice_text = intent_response
         conv = session["conversation"]
         # 🔥 FIX: Use add_exchange to track word counts for talk ratio
         conv.add_exchange(customer_text, voice_text)
-        print(f"[CallHandler] [{call_sid}] Intent matched — skipping Groq")
+        log.info("[%s] Intent matched — skipping Groq", call_sid)
     else:
         # 3. Get AI response (hybrid model routing)
         conv = session["conversation"]
@@ -136,7 +147,7 @@ async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> by
     if not voice_text:
         voice_text = "Ji, samajh rahi hoon. Thoda detail dein?"
 
-    print(f"[CallHandler] [{call_sid}] Priya: {voice_text[:120]}")
+    log.info("[%s] Priya: %s", call_sid, voice_text[:120])
 
     # 4. Text to Speech (async)
     audio_out = await synthesize_speech_async(voice_text, detected_lang)
@@ -164,7 +175,7 @@ def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
 
     from intent import detect_intent
     intent_response = detect_intent(customer_text, lead=session.get("lead"))
-    
+
     conv = session["conversation"]
     if intent_response:
         voice_text = intent_response
@@ -185,6 +196,10 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
     """
     Called when Exotel sends the call-ended webhook.
     Analyses conversation and updates lead.
+
+    🔥 SELF-LEARNING: After analyzing the call, fires a background task
+    to run the learning pipeline (extracts intents, objections, buying
+    signals, and loss reasons from the transcript).
     """
     session = active_calls.pop(call_sid, None)
     if not session:
@@ -198,11 +213,15 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
     lead_id    = session.get("lead_id", "")
     actual_dur = int(time.time() - session["start_time"]) if not duration_sec else duration_sec
 
-    # 🔥 OPTIMIZATION: Log talk ratio for monitoring
+    # Log talk ratio for monitoring
     talk_ratio = conv.get_talk_ratio()
-    print(
-        f"[CallHandler] Call ended | SID: {call_sid} | Duration: {actual_dur}s | "
-        f"Temp: {analysis.get('temperature','?')} | Talk ratio: AI={talk_ratio['ai_ratio']:.0%} User={talk_ratio['user_ratio']:.0%}"
+    log.info(
+        "Call ended | SID: %s | Duration: %ds | Temp: %s | "
+        "Talk ratio: AI=%.0f%% User=%.0f%%",
+        call_sid, actual_dur,
+        analysis.get("temperature", "?"),
+        talk_ratio["ai_ratio"] * 100,
+        talk_ratio["user_ratio"] * 100,
     )
 
     # 🔥 FIX: Wrap in try/except so transcript update below is not skipped on failure
@@ -215,7 +234,7 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
             direction="inbound" if session.get("is_inbound") else "outbound",
         )
     except Exception as exc:
-        print(f"[CallHandler] process_call_result failed for SID {call_sid}: {exc}")
+        log.error("process_call_result failed for SID %s: %s", call_sid, exc)
 
     if lead_id:
         lead = db.get_lead_by_id(lead_id)
@@ -226,4 +245,50 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
         combined = f"{old_transcript}\n\n{new_entry}".strip() if old_transcript else new_entry
         db.update_lead(lead_id, {"last_transcript": combined[-3000:]})
 
+    # 🔥 SELF-LEARNING: Fire background learning pipeline
+    if config.LEARNING_ENABLED:
+        _fire_learning_pipeline(
+            transcript=transcript,
+            call_sid=call_sid,
+            caller=session.get("caller", ""),
+            duration=actual_dur,
+        )
+
     return analysis
+
+
+def _fire_learning_pipeline(transcript: str, call_sid: str,
+                             caller: str, duration: int):
+    """
+    Fire the learning pipeline as a background task.
+
+    Uses asyncio to run the pipeline without blocking the webhook response.
+    If no event loop is running, creates a new one in a thread.
+    """
+    from learning_pipeline import process_call_learning
+
+    async def _run():
+        try:
+            await process_call_learning(
+                transcript=transcript,
+                call_sid=call_sid,
+                caller=caller,
+                call_duration=duration,
+            )
+        except Exception as e:
+            log.error("Background learning pipeline failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run())
+        log.info("Learning pipeline fired as background task for call %s", call_sid)
+    except RuntimeError:
+        # No running event loop — run in a new thread
+        import threading
+
+        def _thread_run():
+            asyncio.run(_run())
+
+        t = threading.Thread(target=_thread_run, daemon=True)
+        t.start()
+        log.info("Learning pipeline fired in background thread for call %s", call_sid)
