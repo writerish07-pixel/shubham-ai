@@ -45,7 +45,7 @@ def start_call_session(call_sid: str, caller_number: str, lead_id: str = None, d
         "lead_id":     lead_id or (lead.get("lead_id") if lead else ""),
         "caller":      caller_number,
         "lead":        lead,
-        "conversation": ConversationManager(lead, is_inbound=(direction != "outbound")),
+        "conversation": ConversationManager(lead, is_inbound=is_inbound),
         "start_time":  time.time(),
         "language":    "hinglish",
         "is_inbound":  is_inbound,
