@@ -265,6 +265,10 @@ class ConversationManager:
         # Remove any trailing incomplete JSON blocks
         text = re.sub(r'\{[^}]*$', '', text).strip()
         
+        # If text became empty after JSON removal, return fallback
+        if not text:
+            return "Ji, main samajh rahi hoon. Aap bataaiye?"
+        
         # Check if response ends mid-word (no punctuation or sentence-ending word)
         # Hindi sentences typically end with: ?, !, ., hai, hain, hoon, ga, gi, ge, ye, lo, do, na
         sentence_enders = ('?', '!', '.', '।',

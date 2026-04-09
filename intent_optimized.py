@@ -235,9 +235,9 @@ def detect_intent(text: str, lead: dict = None) -> str | None:
     # ── Pass 1: Exact/substring match (instant) ──────────────────────
     for intent_name, data in INTENTS.items():
         for pattern in data["patterns"]:
-            # 🔥 FIX: Short patterns use exact word match to avoid
-            # false positives (e.g. 'han' in 'kahan')
-            if len(pattern) < 4:
+            # 🔥 FIX: Single-word patterns use exact word match to avoid
+            # false positives (e.g. 'book' in 'facebook', 'rate' in 'generate')
+            if ' ' not in pattern:
                 matched = pattern in words
             else:
                 matched = pattern in text_lower
