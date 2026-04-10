@@ -808,6 +808,9 @@ async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket:
 
     except Exception as e:
         print(f"[Voicebot] _process_speech error: {e}")
+        if session:
+            session["is_ai_speaking"] = False
+            session["speech_final"] = False
 
 
 @app.websocket("/call/stream")

@@ -514,13 +514,16 @@ class ConversationManager:
                     full_reply += delta.content
                     yield delta.content
 
-            # Validate and fix the complete response
+            # Validate the complete response
             validated = self._validate_response(full_reply)
             if validated != full_reply:
-                # Yield the correction suffix
-                suffix = validated[len(full_reply):]
-                if suffix:
-                    yield suffix
+                # Only yield suffix if validation APPENDED text (not mid-text edits)
+                # Mid-text changes (grammar fixes, markdown removal) are stored in
+                # history but not re-streamed to avoid garbled output
+                if validated.startswith(full_reply):
+                    suffix = validated[len(full_reply):]
+                    if suffix:
+                        yield suffix
                 full_reply = validated
 
             self.history.append({"role": "assistant", "content": full_reply})
