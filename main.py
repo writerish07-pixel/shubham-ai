@@ -616,6 +616,53 @@ async def api_active_calls():
     })
 
 
+@app.get("/api/hybrid/rules")
+async def get_hybrid_rules():
+    rules_path = UPLOAD_DIR / "hybrid_rules.json"
+    if not rules_path.exists():
+        default_rules = {"rules": [
+            {"id": "greeting", "trigger": "opening", "response": "Namaste! Shubham Motors se AI assistant bol raha hu.", "enabled": True},
+            {"id": "price", "trigger": "price inquiry", "response": "Main aapko latest on-road estimate aur offers bata sakta hu.", "enabled": True}
+        ]}
+        rules_path.write_text(json.dumps(default_rules, indent=2))
+        return JSONResponse(default_rules)
+
+    try:
+        return JSONResponse(json.loads(rules_path.read_text()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load hybrid rules: {e}")
+
+
+@app.put("/api/hybrid/rules/{rule_id}")
+async def update_hybrid_rule(rule_id: str, request: Request):
+    payload = await request.json()
+    rules_path = UPLOAD_DIR / "hybrid_rules.json"
+    data = {"rules": []}
+
+    if rules_path.exists():
+        try:
+            data = json.loads(rules_path.read_text())
+        except Exception:
+            data = {"rules": []}
+
+    rules = data.get("rules", [])
+    updated = False
+    for idx, rule in enumerate(rules):
+        if rule.get("id") == rule_id:
+            rules[idx] = {**rule, **payload, "id": rule_id}
+            updated = True
+            break
+
+    if not updated:
+        rules.append({"id": rule_id, **payload})
+
+    data["rules"] = rules
+    rules_path.write_text(json.dumps(data, indent=2))
+    return JSONResponse({"success": True, "rule_id": rule_id})
+
+
+
+
 # ── SELF-LEARNING ENDPOINTS ──────────────────────────────────────────────────
 
 @app.post("/api/documents/upload")
