@@ -134,28 +134,45 @@ _pending_outbound: set[str] = set()
 _executor = ThreadPoolExecutor(max_workers=config.THREAD_POOL_SIZE)
 
 
+# Trusted hosting domains for auto-detection (prevents host header poisoning)
+_TRUSTED_HOST_SUFFIXES = (
+    ".onrender.com",
+    ".railway.app",
+    ".herokuapp.com",
+    ".fly.dev",
+    ".ngrok-free.app",
+    ".ngrok.io",
+)
+
+
 def _get_public_url(request: Request) -> str:
     """Return the public URL for Exotel callbacks.
 
     If PUBLIC_URL is explicitly set in .env (not the localhost default),
-    use that.  Otherwise auto-detect from the incoming request so that
-    deployments on Render / Railway / etc. work without manual config.
+    use that.  Otherwise auto-detect from the X-Forwarded-Host header
+    set by reverse proxies (Render, Railway, etc.).  Only trusts hosts
+    matching known hosting platform domains to prevent header poisoning.
     """
     configured = config.PUBLIC_URL
     if configured and "localhost" not in configured and "127.0.0.1" not in configured:
         return configured.rstrip("/")
 
-    # Auto-detect from request headers (Render sets X-Forwarded-Proto/Host)
-    scheme = request.headers.get("x-forwarded-proto", "https")
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
-    if host:
-        detected = f"{scheme}://{host}"
-        # Cache it so subsequent calls (audio serving, etc.) also use it
-        config.PUBLIC_URL = detected
-        print(f"[Config] AUTO-DETECTED PUBLIC_URL: {detected}")
-        return detected
+    # Only trust X-Forwarded-Host (set by reverse proxies), not raw Host header
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").strip()
+    if not forwarded_host:
+        return configured
 
-    return configured
+    # Validate against trusted hosting domains
+    host_lower = forwarded_host.lower().split(":")[0]  # strip port if present
+    if not any(host_lower.endswith(suffix) for suffix in _TRUSTED_HOST_SUFFIXES):
+        print(f"[Config] WARNING: Untrusted X-Forwarded-Host '{forwarded_host}' — ignoring")
+        return configured
+
+    scheme = request.headers.get("x-forwarded-proto", "https")
+    detected = f"{scheme}://{forwarded_host}"
+    config.PUBLIC_URL = detected
+    print(f"[Config] AUTO-DETECTED PUBLIC_URL: {detected}")
+    return detected
 
 
 # ── HEALTH ─────────────────────────────────────────────────────────────────────
@@ -589,6 +606,9 @@ async def import_leads(file: UploadFile = File(...)):
 
 @app.post("/api/call/make")
 async def trigger_call(request: Request, background_tasks: BackgroundTasks):
+    # Ensure PUBLIC_URL is resolved before triggering outbound call
+    _get_public_url(request)
+
     data    = await request.json()
     lead_id = data.get("lead_id", "")
     mobile  = data.get("mobile", "")
