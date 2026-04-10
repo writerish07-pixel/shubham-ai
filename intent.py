@@ -2,17 +2,11 @@
 intent.py
 Fast intent detection — bypasses Groq for simple/common customer inputs.
 
-OPTIMIZATIONS:
-- 🔥 OPTIMIZATION: Pre-compiled set lookup instead of O(n) pattern scan
-- 🔥 OPTIMIZATION: Shorter responses for faster TTS
-- 🔥 OPTIMIZATION: Added more patterns for better coverage (fewer Groq calls)
-- 🔥 FIX: Added fuzzy matching via difflib for near-matches (handles STT errors)
-- 🔥 FIX: Added 8 new intents (price, mileage, availability, color, exchange, downpayment, whatsapp, greeting)
-- 🔥 FIX: Intent classification layer reduces LLM calls by ~60-70%
+Covers ~25 intents with exact + fuzzy matching to handle STT errors.
+Reduces LLM calls by ~60-70% by catching common patterns locally.
 """
 from difflib import SequenceMatcher
 
-# 🔥 OPTIMIZATION: Use frozensets for O(1) lookup instead of list iteration
 INTENTS = {
     "yes_visit": {
         "patterns": frozenset([
@@ -27,9 +21,6 @@ INTENTS = {
         ]),
         "response": "Bahut accha! Aap kab aa rahe hain — aaj ya kal?"
     },
-    # 🔥 FIX: Moved busy, not_interested, callback BEFORE acknowledgement
-    # so compound phrases like "haan, busy hoon" match the specific intent
-    # first instead of matching acknowledgement's broad "haan" pattern.
     "busy": {
         "patterns": frozenset([
             "busy", "baad mein", "baad me", "abhi nahi", "abhi mat",
@@ -59,7 +50,6 @@ INTENTS = {
         ]),
         "response": "Bilkul! Kab call karoon — subah ya shaam?"
     },
-    # 🔥 FIX: New intent — Price inquiry (very common, saves many LLM calls)
     "price": {
         "patterns": frozenset([
             "price", "price kya hai", "kitne ka hai", "kitne ki hai",
@@ -72,7 +62,6 @@ INTENTS = {
         ]),
         "response": "Sir, konsi bike mein interest hai? Model bataaiye, main best price WhatsApp pe bhej deti hoon."
     },
-    # 🔥 FIX: New intent — Mileage inquiry
     "mileage": {
         "patterns": frozenset([
             "mileage", "kitna deti hai", "kitna chalti hai", "average",
@@ -82,7 +71,6 @@ INTENTS = {
         ]),
         "response": "Hero bikes ka mileage sabse best hai — 50 se 80 kmpl tak! Konsi bike dekh rahe hain?"
     },
-    # 🔥 FIX: New intent — Availability
     "availability": {
         "patterns": frozenset([
             "available", "stock mein", "available hai", "mil jayegi",
@@ -92,7 +80,6 @@ INTENTS = {
         ]),
         "response": "Ji bilkul, ready stock hai showroom mein! Aap kab aa sakte hain dekhne?"
     },
-    # 🔥 FIX: New intent — Color inquiry
     "color": {
         "patterns": frozenset([
             "colour", "color", "rang", "kaunsa rang", "kaunsa color",
@@ -103,7 +90,6 @@ INTENTS = {
         ]),
         "response": "Bahut saare colors available hain! Konsi bike ka color dekhna hai? Showroom mein sab dikha doongi."
     },
-    # 🔥 FIX: New intent — Exchange / old bike
     "exchange": {
         "patterns": frozenset([
             "exchange", "purani bike", "old bike", "purana", "exchange offer",
@@ -113,7 +99,6 @@ INTENTS = {
         ]),
         "response": "Exchange offer available hai ji! Purani bike ka best price denge. Konsi bike hai aapki abhi?"
     },
-    # 🔥 FIX: New intent — Downpayment / booking
     "downpayment": {
         "patterns": frozenset([
             "downpayment", "down payment", "booking amount", "kitna dena padega",
@@ -130,8 +115,6 @@ INTENTS = {
             "हाँ", "हां", "ठीक है", "ठीक", "जी", "जी हाँ", "बिल्कुल",
             "सही", "अच्छा", "हम्म",
         ]),
-        # 🔥 FIX: Removed short patterns ('ha', 'g', 'ji') that cause false-positive
-        # substring matches in words like 'kahan', 'glamour', 'jaipur' etc.
         "response": "Accha ji! Kab showroom aa sakte hain test ride ke liye?"
     },
     "address": {
@@ -162,7 +145,6 @@ INTENTS = {
         ]),
         "response": "Test ride bilkul free hai! Aap kab aa sakte hain showroom?"
     },
-    # 🔥 OPTIMIZATION: New intents to catch more patterns without Groq
     "thanks": {
         "patterns": frozenset([
             "dhanyavaad", "thank you", "thanks", "shukriya", "धन्यवाद",
@@ -179,7 +161,6 @@ INTENTS = {
         ]),
         "response": "EMI sirf 1,800 se shuru hai! Aapka budget bataaiye, best plan WhatsApp pe bhejungi."
     },
-    # 🔥 FIX: New intent — WhatsApp request
     "whatsapp": {
         "patterns": frozenset([
             "whatsapp", "whatsapp pe bhejo", "whatsapp karo",
@@ -189,7 +170,6 @@ INTENTS = {
         ]),
         "response": "Bilkul! Aapka WhatsApp number ye hi hai kya? Main abhi details bhej deti hoon."
     },
-    # 🔥 FIX: New intent — Greeting
     "greeting": {
         "patterns": frozenset([
             "namaste", "namaskar", "hello", "hi", "hey",
@@ -198,16 +178,70 @@ INTENTS = {
         ]),
         "response": "Namaste ji! Main Priya, Shubham Motors se. Kaise madad kar sakti hoon aapki?"
     },
+    # Need discovery intents — capture customer situation without LLM
+    "usage_query": {
+        "patterns": frozenset([
+            "office ke liye", "daily use", "commute", "office jaana",
+            "college ke liye", "school ke liye", "family ke liye",
+            "ghar ke liye", "sheher mein", "city mein", "highway",
+            "lambi doori", "long distance", "village", "gaon",
+        ]),
+        "response": "Accha ji! Aapka budget kitna hai? Best matching model suggest karti hoon."
+    },
+    "budget_query": {
+        "patterns": frozenset([
+            "budget", "kitna kharcha", "kitna lagega total",
+            "50 hazaar", "60 hazaar", "70 hazaar", "80 hazaar",
+            "90 hazaar", "1 lakh", "ek lakh", "1.5 lakh",
+            "kam budget", "sasta", "cheapest", "sabse sasta",
+            "budget kam hai", "jyada nahi", "limited budget",
+        ]),
+        "response": "Ji bilkul! Is budget mein achhe options hain. Showroom aayiye, sab dikhati hoon!"
+    },
+    "service_query": {
+        "patterns": frozenset([
+            "service", "servicing", "free service", "service center",
+            "service kab", "service kitni", "warranty", "guarantee",
+            "सर्विस", "सर्विसिंग", "वारंटी", "गारंटी",
+            "service cost", "service charge", "maintenance",
+        ]),
+        "response": "Hero ki service sabse sasti hai aur 5 free services milti hain! Aur kuch jaanna hai?"
+    },
+    "insurance_query": {
+        "patterns": frozenset([
+            "insurance", "bima", "insure", "insurance kitna",
+            "इंश्योरेंस", "बीमा", "insurance cost", "insurance included",
+        ]),
+        "response": "Insurance bilkul arrange ho jayega. Best rate milega humse! Kab aana chahenge?"
+    },
+    "comparison": {
+        "patterns": frozenset([
+            "compare", "comparison", "konsi better", "konsi acchi",
+            "kya farak", "difference", "dono mein", "vs",
+            "splendor ya passion", "glamour ya xtreme",
+            "konsi loon", "suggest karo", "recommend",
+        ]),
+        "response": "Dono achhi hain! Aap bike kahan use karenge — daily office ya family rides?"
+    },
+    "offer_query": {
+        "patterns": frozenset([
+            "offer", "discount", "scheme", "deal", "cashback",
+            "ऑफर", "डिस्काउंट", "स्कीम", "कैशबैक",
+            "koi offer", "kya offer", "special offer", "festival offer",
+            "kuch offer", "best deal", "sasta karo",
+        ]),
+        "response": "Haan ji, is mahine special offer chal raha hai! Showroom aayiye, full details deti hoon."
+    },
 }
 
-# 🔥 FIX: Pre-build flattened pattern list for fuzzy matching
+# Pre-build flattened pattern list for fuzzy matching
 _ALL_PATTERNS = []
 for _intent_name, _data in INTENTS.items():
     for _pattern in _data["patterns"]:
         _ALL_PATTERNS.append((_pattern, _intent_name))
 
-# 🔥 FIX: Fuzzy match threshold — minimum similarity ratio for a match
-FUZZY_THRESHOLD = 0.80
+# Fuzzy match threshold — minimum similarity ratio for a match
+FUZZY_THRESHOLD = 0.78  # Slightly lower to catch more STT errors
 
 
 def detect_intent(text: str, lead: dict = None) -> str | None:
@@ -216,34 +250,28 @@ def detect_intent(text: str, lead: dict = None) -> str | None:
     
     Pipeline:
     1. Exact/substring match (O(1) per pattern) — instant
-    2. Fuzzy match via SequenceMatcher — still <1ms for ~200 patterns
+    2. Fuzzy match via SequenceMatcher — still <1ms for ~300 patterns
     
     Returns response string if matched, None otherwise.
-    
-    🔥 FIX: Uses word-boundary matching for short patterns (len < 4)
-    to prevent false-positive substring matches.
-    🔥 FIX: Added fuzzy matching as fallback for near-misses (typos, STT errors)
     """
     text_lower = text.lower().strip()
     if len(text_lower) < 2:
         return None
     
     has_name = lead and lead.get("name", "").strip()
-    # 🔥 FIX: Pre-split words for word-boundary matching of short patterns
     words = set(text_lower.split())
     
     # ── Pass 1: Exact/substring match (instant) ──────────────────────
     for intent_name, data in INTENTS.items():
         for pattern in data["patterns"]:
-            # 🔥 FIX: Single-word patterns use exact word match to avoid
-            # false positives (e.g. 'book' in 'facebook', 'rate' in 'generate')
+            # Single-word patterns use exact word match to avoid false positives
             if ' ' not in pattern:
                 matched = pattern in words
             else:
                 matched = pattern in text_lower
             if matched:
                 if intent_name == "acknowledgement" and not has_name:
-                    break  # 🔥 FIX: Skip acknowledgement, continue checking others
+                    break  # Skip acknowledgement without name
                 print(f"[Intent] Exact match '{intent_name}' for: '{text[:50]}'")
                 return data["response"]
     

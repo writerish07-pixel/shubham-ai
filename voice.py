@@ -2,31 +2,26 @@
 voice.py
 Handles Speech-to-Text (Sarvam primary, Deepgram fallback) and Text-to-Speech (Sarvam).
 
-OPTIMIZATIONS:
-- 🔥 OPTIMIZATION: Use httpx with connection pooling instead of requests (saves ~200ms per call)
-- 🔥 OPTIMIZATION: Async-native TTS and STT functions (no thread pool needed)
-- 🔥 OPTIMIZATION: Reduced timeouts from 15-20s to 6-8s (fail fast)
-- 🔥 OPTIMIZATION: TTS pace increased to 1.2 for faster, more natural phone speech
-- 🔥 OPTIMIZATION: Parallel TTS chunk processing for long text
-- 🔥 FIX: Removed synchronous requests — all I/O is now async
+Features:
+- httpx with connection pooling (saves ~200ms per call)
+- Async-native TTS and STT functions
+- Parallel TTS chunk processing for long text
+- TTS pace 1.2 for natural phone speech
 """
 import base64, re
 import httpx
 import asyncio
 import config
 
-# 🔥 OPTIMIZATION: Persistent HTTP client with connection pooling
-# Reuses TCP connections — saves ~100-200ms per request (no new TLS handshake)
+# Persistent HTTP client with connection pooling
 _http_client = None
 
 def _get_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
         _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(8.0, connect=3.0),
+            timeout=httpx.Timeout(10.0, connect=4.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            # 🔥 FIX: Removed http2=True (requires h2 package not in requirements.txt)
-            # Connection pooling benefits are retained without HTTP/2
         )
     return _http_client
 
@@ -77,7 +72,6 @@ def _detect_audio_mime(audio_bytes: bytes) -> str:
 
 # ── SPEECH TO TEXT ────────────────────────────────────────────────────────────
 
-# 🔥 OPTIMIZATION: Async STT — no thread pool overhead
 async def transcribe_audio_async(audio_bytes: bytes, language_hint: str = "hi-IN") -> dict:
     """
     Async version of transcribe_audio.
@@ -97,7 +91,6 @@ async def transcribe_audio_async(audio_bytes: bytes, language_hint: str = "hi-IN
         return {"text": "", "language": "unknown", "confidence": 0.0}
 
 
-# 🔥 OPTIMIZATION: Keep synchronous version for backward compatibility but use httpx
 def transcribe_audio(audio_bytes: bytes, language_hint: str = "hi-IN") -> dict:
     """Synchronous wrapper — delegates to sync httpx calls."""
     try:
@@ -130,7 +123,6 @@ async def _sarvam_stt_async(audio_bytes: bytes, language: str = "hi-IN") -> dict
     }
 
     client = _get_client()
-    # 🔥 OPTIMIZATION: Reduced timeout from 15s to STT_TIMEOUT_SEC (default 6s)
     r = await client.post(SARVAM_STT_URL, headers=headers, files=files, data=data,
                           timeout=config.STT_TIMEOUT_SEC)
 
@@ -162,7 +154,6 @@ def _sarvam_stt(audio_bytes: bytes, language: str = "hi-IN") -> dict:
         "with_timestamps": "false",
     }
 
-    # 🔥 OPTIMIZATION: Use httpx sync client with reduced timeout
     with httpx.Client(timeout=config.STT_TIMEOUT_SEC) as client:
         r = client.post(SARVAM_STT_URL, headers=headers, files=files, data=data)
 
@@ -254,7 +245,6 @@ async def _deepgram_stt_async(audio_bytes: bytes) -> dict:
 
 # ── TEXT TO SPEECH ────────────────────────────────────────────────────────────
 
-# 🔥 OPTIMIZATION: Async TTS — eliminates thread pool overhead
 async def synthesize_speech_async(text: str, language: str = "hinglish") -> bytes:
     """
     Async convert text -> MP3 audio bytes via Sarvam AI.
@@ -307,7 +297,6 @@ async def _sarvam_tts_async(text: str, language: str = "hi-IN") -> bytes:
         "Content-Type":         "application/json",
     }
 
-    # 🔥 OPTIMIZATION: Process TTS chunks in parallel instead of sequentially
     if len(chunks) == 1:
         return await _tts_single_chunk(chunks[0], language, headers)
 
@@ -318,7 +307,6 @@ async def _sarvam_tts_async(text: str, language: str = "hi-IN") -> bytes:
     for result in results:
         if isinstance(result, Exception):
             print(f"[Voice] TTS chunk failed: {result}")
-            # 🔥 FIX: If any chunk fails, discard all and raise so caller falls back to <Say>
             raise result
         all_audio += result
 
@@ -333,13 +321,12 @@ async def _tts_single_chunk(chunk: str, language: str, headers: dict) -> bytes:
         "speaker":              "anushka",
         "model":                "bulbul:v2",
         "pitch":                0,
-        "pace":                 1.2,   # 🔥 OPTIMIZATION: Faster pace for natural phone speech (was 1.1)
+        "pace":                 1.15,  # Natural phone speech pace
         "loudness":             1.5,
         "enable_preprocessing": True,
     }
 
     client = _get_client()
-    # 🔥 OPTIMIZATION: Reduced timeout from 20s to TTS_TIMEOUT_SEC (default 5s)
     r = await client.post(SARVAM_TTS_URL, headers=headers, json=payload,
                           timeout=config.TTS_TIMEOUT_SEC)
 
@@ -373,7 +360,7 @@ def _sarvam_tts(text: str, language: str = "hi-IN") -> bytes:
             "speaker":              "anushka",
             "model":                "bulbul:v2",
             "pitch":                0,
-            "pace":                 1.2,   # 🔥 OPTIMIZATION: Faster pace
+            "pace":                 1.15,  # Natural phone speech pace
             "loudness":             1.5,
             "enable_preprocessing": True,
         }

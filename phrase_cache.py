@@ -2,11 +2,8 @@
 phrase_cache.py
 Pre-generates TTS audio for common Priya phrases at startup.
 
-OPTIMIZATIONS:
-- 🔥 OPTIMIZATION: Added intent response phrases to cache (covers ~80% of responses)
-- 🔥 OPTIMIZATION: Normalized text comparison for better cache hits
-- 🔥 FIX: Raised similarity threshold to 0.92 to prevent wrong audio for similar phrases
-- 🔥 OPTIMIZATION: Hash-based exact match before fuzzy matching
+Covers all intent responses + common AI fallback phrases.
+Hash-based exact match (O(1)) with fuzzy fallback.
 """
 import logging
 from difflib import SequenceMatcher
@@ -16,9 +13,8 @@ from audio_utils import _mp3_to_pcm
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("shubham-ai.phrase_cache")
 
-# 🔥 FIX: Extended cache with ALL intent responses (including new intents) + common AI phrases
 CACHED_PHRASES = [
-    # Intent responses (from intent.py — must match exactly)
+    # Intent responses (must match intent.py exactly)
     "Bahut accha! Aap kab aa rahe hain — aaj ya kal?",
     "Accha ji! Kab showroom aa sakte hain test ride ke liye?",
     "Koi baat nahi! Kab call karoon — aapko kab free rahega?",
@@ -29,7 +25,6 @@ CACHED_PHRASES = [
     "Bilkul! Kab call karoon — subah ya shaam?",
     "Dhanyavaad ji! Kuch aur madad chahiye toh bataaiye.",
     "EMI sirf 1,800 se shuru hai! Aapka budget bataaiye, best plan WhatsApp pe bhejungi.",
-    # 🔥 FIX: New intent responses (price, mileage, availability, color, exchange, downpayment, whatsapp, greeting)
     "Sir, konsi bike mein interest hai? Model bataaiye, main best price WhatsApp pe bhej deti hoon.",
     "Hero bikes ka mileage sabse best hai — 50 se 80 kmpl tak! Konsi bike dekh rahe hain?",
     "Ji bilkul, ready stock hai showroom mein! Aap kab aa sakte hain dekhne?",
@@ -38,8 +33,15 @@ CACHED_PHRASES = [
     "Sirf 1,000 rupaye se booking ho jaati hai, wo bhi refundable! Kab book karein?",
     "Bilkul! Aapka WhatsApp number ye hi hai kya? Main abhi details bhej deti hoon.",
     "Namaste ji! Main Priya, Shubham Motors se. Kaise madad kar sakti hoon aapki?",
+    # New intent responses (usage, budget, service, insurance, comparison, offer)
+    "Accha ji! Aapka budget kitna hai? Best matching model suggest karti hoon.",
+    "Ji bilkul! Is budget mein achhe options hain. Showroom aayiye, sab dikhati hoon!",
+    "Hero ki service sabse sasti hai aur 5 free services milti hain! Aur kuch jaanna hai?",
+    "Insurance bilkul arrange ho jayega. Best rate milega humse! Kab aana chahenge?",
+    "Dono achhi hain! Aap bike kahan use karenge — daily office ya family rides?",
+    "Haan ji, is mahine special offer chal raha hai! Showroom aayiye, full details deti hoon.",
     # Common AI fallback phrases
-    "Ji, samajh rahi hoon. Thoda detail dein?",
+    "Ji, samajh rahi hoon. Aap bataaiye?",
     "Ji, main samajh rahi hoon. Aap bataaiye?",
     "Ji? Phir se bol sakte hain?",
     "Main manager se confirm karke bata deti hoon.",
@@ -52,11 +54,7 @@ CACHED_PHRASES = [
 ]
 
 _cache: dict[str, bytes] = {}
-# 🔥 FIX: Raised threshold from 0.78 to 0.92 to prevent serving wrong
-# cached audio when LLM-generated text is similar but semantically different
 SIMILARITY_THRESHOLD = 0.92
-
-# 🔥 OPTIMIZATION: Normalized exact match index for O(1) lookup
 _exact_index: dict[str, bytes] = {}
 
 
@@ -70,7 +68,6 @@ def build_cache() -> None:
                 pcm = _mp3_to_pcm(audio)
                 if pcm:
                     _cache[phrase] = pcm
-                    # 🔥 OPTIMIZATION: Build normalized index for fast exact matching
                     _exact_index[phrase.strip().lower()] = pcm
                     success += 1
                     log.info(f"[PhraseCache] Cached: '{phrase[:50]}' ({len(pcm)} bytes)")
@@ -80,10 +77,7 @@ def build_cache() -> None:
 
 
 def get_cached_audio(text: str) -> bytes | None:
-    """
-    Return cached PCM if text matches a cached phrase.
-    🔥 OPTIMIZATION: Hash-based exact match first (O(1)), then fuzzy.
-    """
+    """Return cached PCM if text matches a cached phrase (O(1) exact, then fuzzy)."""
     text_clean = text.strip().lower()
 
     # 1. Hash-based exact match (O(1) — instant)

@@ -1,17 +1,14 @@
 """
 call_handler.py
-Manages active call sessions.
+Manages active call sessions with strict turn-taking.
 
-OPTIMIZATIONS:
-- 🔥 OPTIMIZATION: Parallel STT + intent detection
-- 🔥 OPTIMIZATION: Streaming LLM → TTS pipeline
-- 🔥 OPTIMIZATION: Async-native audio processing (no thread pool)
-- 🔥 OPTIMIZATION: Talk ratio tracking per session
-- 🔥 FIX: process_customer_speech now uses async pipeline
-
-SELF-LEARNING:
-- 🔥 Fires async learning pipeline after every call ends
-- 🔥 Zero impact on webhook response time (background task)
+Features:
+- Parallel STT + intent detection
+- Streaming LLM → TTS pipeline
+- Async-native audio processing
+- Talk ratio tracking per session
+- Strict turn-taking state flags (is_user_speaking, speech_final, is_ai_speaking)
+- Fires async learning pipeline after every call ends
 """
 import asyncio
 import logging
@@ -62,10 +59,11 @@ def start_call_session(call_sid: str, caller_number: str, lead_id: str = None, d
         "is_inbound":  is_inbound,
         "turn_count":  0,
         "silence_count": 0,
-        # 🔥 FIX: Turn-taking state flags
+        # Strict turn-taking state flags
         "is_user_speaking": False,   # True while user audio is being received
         "speech_final": False,       # True when end-of-speech silence detected
         "is_ai_speaking": False,     # True while AI response audio is playing
+        "last_user_speech_time": 0.0,  # Timestamp of last user speech for silence detection
     }
 
     active_calls[call_sid] = session
@@ -90,10 +88,8 @@ def get_opening_audio(call_sid: str) -> bytes:
     opening_text = get_opening_message(lead, is_inbound=is_inbound)
     log.info("Opening text: %s", opening_text[:120])
 
-    # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
     session["conversation"].add_ai_message(opening_text)
 
-    # 🔥 OPTIMIZATION: Uses optimized voice module with connection pooling
     audio = synthesize_speech(opening_text, "hinglish")
 
     if not audio:
@@ -106,11 +102,15 @@ def get_opening_audio(call_sid: str) -> bytes:
 
 async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> bytes:
     """
-    🔥 OPTIMIZATION: Async version of process_customer_speech.
+    Async speech processing with strict turn-taking.
     Uses async STT and TTS — no thread pool overhead.
     """
     session = active_calls.get(call_sid)
     if not session:
+        return b""
+
+    # STRICT: Only process if user has finished speaking
+    if session.get("is_user_speaking", False):
         return b""
 
     # 1. Speech to Text (async)
@@ -120,8 +120,12 @@ async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> by
 
     if not customer_text:
         silence_reply = "Ji? Phir se bol sakte hain?"
-        # 🔥 FIX: Use async TTS to avoid blocking the event loop
         return await synthesize_speech_async(silence_reply, session["language"])
+
+    # STRICT: Check again after STT — user may have started speaking again
+    if session.get("is_user_speaking", False):
+        log.info("[%s] User resumed speaking during STT — aborting", call_sid)
+        return b""
 
     session["language"]  = detected_lang
     session["turn_count"] += 1
@@ -135,22 +139,32 @@ async def process_customer_speech_async(call_sid: str, audio_bytes: bytes) -> by
     if intent_response:
         voice_text = intent_response
         conv = session["conversation"]
-        # 🔥 FIX: Use add_exchange to track word counts for talk ratio
         conv.add_exchange(customer_text, voice_text)
         log.info("[%s] Intent matched — skipping Groq", call_sid)
     else:
-        # 3. Get AI response (hybrid model routing)
+        # 3. Get AI response (hybrid model routing + response validation)
         conv = session["conversation"]
         ai_reply = conv.chat(customer_text)
         voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
 
     if not voice_text:
-        voice_text = "Ji, samajh rahi hoon. Thoda detail dein?"
+        voice_text = "Ji, samajh rahi hoon. Aap bataaiye?"
 
     log.info("[%s] Priya: %s", call_sid, voice_text[:120])
 
+    # STRICT: Check before TTS — abort if user interrupted
+    if session.get("is_user_speaking", False):
+        log.info("[%s] User interrupted before TTS — aborting", call_sid)
+        return b""
+
+    # Mark AI as speaking
+    session["is_ai_speaking"] = True
+
     # 4. Text to Speech (async)
     audio_out = await synthesize_speech_async(voice_text, detected_lang)
+
+    # Mark AI as done speaking
+    session["is_ai_speaking"] = False
     return audio_out
 
 
@@ -179,14 +193,13 @@ def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
     conv = session["conversation"]
     if intent_response:
         voice_text = intent_response
-        # 🔥 FIX: Use add_exchange to track word counts for talk ratio
         conv.add_exchange(customer_text, voice_text)
     else:
         ai_reply = conv.chat(customer_text)
         voice_text = re.sub(r'\{[\s\S]*?\}', '', ai_reply).strip()
 
     if not voice_text:
-        voice_text = "Ji, samajh rahi hoon. Thoda detail dein?"
+        voice_text = "Ji, samajh rahi hoon. Aap bataaiye?"
 
     audio_out = synthesize_speech(voice_text, detected_lang)
     return audio_out
@@ -195,11 +208,7 @@ def process_customer_speech(call_sid: str, audio_bytes: bytes) -> bytes:
 def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
     """
     Called when Exotel sends the call-ended webhook.
-    Analyses conversation and updates lead.
-
-    🔥 SELF-LEARNING: After analyzing the call, fires a background task
-    to run the learning pipeline (extracts intents, objections, buying
-    signals, and loss reasons from the transcript).
+    Analyses conversation, updates lead, and fires learning pipeline.
     """
     session = active_calls.pop(call_sid, None)
     if not session:
@@ -224,7 +233,6 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
         talk_ratio["user_ratio"] * 100,
     )
 
-    # 🔥 FIX: Wrap in try/except so transcript update below is not skipped on failure
     try:
         process_call_result(
             lead_id=lead_id,
@@ -245,7 +253,7 @@ def end_call_session(call_sid: str, duration_sec: int = 0) -> dict:
         combined = f"{old_transcript}\n\n{new_entry}".strip() if old_transcript else new_entry
         db.update_lead(lead_id, {"last_transcript": combined[-3000:]})
 
-    # 🔥 SELF-LEARNING: Fire background learning pipeline
+    # Fire background learning pipeline
     if config.LEARNING_ENABLED:
         _fire_learning_pipeline(
             transcript=transcript,
