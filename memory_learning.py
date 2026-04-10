@@ -1,14 +1,15 @@
 """
 memory_learning.py — Vector database memory system for self-learning agent.
 
-🔥 SELF-LEARNING ADDED: Complete vector DB implementation using FAISS for:
+Complete vector DB implementation using FAISS for:
 - Storing conversation learnings as embeddings
 - Storing document content (PDFs, images, offers) as embeddings
 - RAG retrieval: fetch relevant past knowledge before generating responses
 - Semantic search across all stored knowledge
+- Recency-weighted scoring: recent learnings are boosted for continuous improvement
 
 Architecture:
-- Uses sentence-transformers for text → embedding conversion
+- Uses sentence-transformers for text -> embedding conversion
 - Uses FAISS for fast similarity search (in-memory, ~5-20ms per query)
 - Persists index + metadata to disk for durability across restarts
 - Thread-safe with file locking for concurrent access
@@ -30,18 +31,20 @@ log = logging.getLogger("shubham-ai.memory")
 _faiss_index = None
 _embedding_model = None
 _metadata_store: list[dict] = []
-# 🔥 FIX: Use RLock (re-entrant) — store/retrieve acquire _lock then call
+# RLock (re-entrant) — store/retrieve acquire _lock then call
 # _get_faiss_index() which also acquires _lock. A plain Lock would deadlock.
 _lock = threading.RLock()
+
+# Recency weighting: boost factor per day of age (newer = higher score)
+_RECENCY_DECAY_PER_DAY = 0.02  # 2% boost reduction per day old
+_MAX_RECENCY_BOOST = 0.15      # max 15% boost for very recent learnings
 
 # Storage paths
 _INDEX_PATH = config.VECTOR_DB_DIR / "faiss_index.bin"
 _METADATA_PATH = config.VECTOR_DB_DIR / "metadata.json"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Embedding model loader (lazy, loads on first use)
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Embedding model loader (lazy, loads on first use) ────────────────────────
 
 def _get_embedding_model():
     """
@@ -63,20 +66,14 @@ def _get_embedding_model():
 
 
 def embed_text(text: str) -> np.ndarray:
-    """
-    Convert text to embedding vector.
-    🔥 SELF-LEARNING ADDED: Returns normalized 384-dim float32 vector.
-    """
+    """Convert text to normalized 384-dim float32 embedding vector."""
     model = _get_embedding_model()
     embedding = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
     return np.array(embedding, dtype=np.float32)
 
 
 def embed_texts(texts: list[str]) -> np.ndarray:
-    """
-    Batch embed multiple texts at once (faster than individual calls).
-    🔥 SELF-LEARNING ADDED: Returns (N, 384) float32 matrix.
-    """
+    """Batch embed multiple texts at once (faster than individual calls)."""
     if not texts:
         return np.array([], dtype=np.float32).reshape(0, config.EMBEDDING_DIMENSION)
     model = _get_embedding_model()
@@ -85,9 +82,7 @@ def embed_texts(texts: list[str]) -> np.ndarray:
     return np.array(embeddings, dtype=np.float32)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: FAISS index management
-# ══════════════════════════════════════════════════════════════════════════════
+# ── FAISS index management ───────────────────────────────────────────────────
 
 def _get_faiss_index():
     """Get or create the FAISS index. Thread-safe, lazy-loaded."""
@@ -130,9 +125,7 @@ def _save_index():
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Store and retrieve knowledge
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Store and retrieve knowledge ─────────────────────────────────────────────
 
 def store_learning(text: str, metadata: dict) -> bool:
     """
@@ -219,11 +212,28 @@ def store_learnings_batch(items: list[dict]) -> int:
         return 0
 
 
+def _recency_boost(stored_at: str) -> float:
+    """Calculate a recency boost for a learning entry.
+
+    Recent learnings get a small score boost so the agent continuously
+    improves by preferring newer knowledge when relevance is similar.
+    """
+    try:
+        stored_time = time.mktime(time.strptime(stored_at, "%Y-%m-%d %H:%M:%S"))
+        age_days = (time.time() - stored_time) / 86400.0
+        boost = max(0.0, _MAX_RECENCY_BOOST - age_days * _RECENCY_DECAY_PER_DAY)
+        return boost
+    except (ValueError, OverflowError):
+        return 0.0
+
+
 def retrieve_relevant(query: str, top_k: int = None,
                       min_similarity: float = None,
                       filter_type: Optional[str] = None) -> list[dict]:
-    """
-    🔥 SELF-LEARNING ADDED: RAG retrieval — find most relevant past learnings.
+    """RAG retrieval — find most relevant past learnings.
+
+    Uses cosine similarity with recency weighting so newer learnings are
+    preferred when relevance scores are close (continuous improvement).
 
     Args:
         query: The search query (customer's question, topic, etc.)
@@ -241,7 +251,6 @@ def retrieve_relevant(query: str, top_k: int = None,
         min_similarity = config.RAG_MIN_SIMILARITY
 
     try:
-        # 🔥 FIX: Acquire lock to prevent race condition with concurrent store operations
         with _lock:
             index = _get_faiss_index()
             if index.ntotal == 0:
@@ -267,36 +276,31 @@ def retrieve_relevant(query: str, top_k: int = None,
             if filter_type and entry.get("metadata", {}).get("type") != filter_type:
                 continue
 
+            # Apply recency boost for continuous improvement
+            boost = _recency_boost(entry.get("stored_at", ""))
+            adjusted_score = float(score) + boost
+
             results.append({
                 "text": entry["text"],
-                "score": float(score),
+                "score": adjusted_score,
+                "raw_score": float(score),
+                "recency_boost": boost,
                 "metadata": entry.get("metadata", {}),
             })
 
-            if len(results) >= top_k:
-                break
-
-        return results
+        # Re-sort by adjusted score and limit to top_k
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:top_k]
     except Exception as e:
         log.error("RAG retrieval failed: %s", e)
         return []
 
 
 def get_relevant_context(query: str, max_chars: int = 800) -> str:
-    """
-    🔥 SELF-LEARNING ADDED: Get formatted context string for RAG injection.
+    """Get formatted context string for RAG injection into system prompt.
 
-    Retrieves relevant past learnings and formats them as a compact string
-    that can be injected into the system prompt before generating a response.
-
-    Args:
-        query: The customer's current message
-        max_chars: Maximum total characters for the context block
-
-    Returns:
-        Formatted string like:
-        "[Past Learning] Customer asked about Splendor price → ₹74K-78K ex-showroom"
-        "[Past Learning] Objection: price too high → Offered EMI ₹1800/month"
+    Retrieves relevant past learnings and formats them as a compact string.
+    Recent learnings are boosted via recency weighting for continuous improvement.
     """
     results = retrieve_relevant(query)
     if not results:
@@ -319,9 +323,7 @@ def get_relevant_context(query: str, max_chars: int = 800) -> str:
     return "\n".join(lines)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Utility functions
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Utility functions ────────────────────────────────────────────────────────
 
 def get_stats() -> dict:
     """Return vector DB statistics."""

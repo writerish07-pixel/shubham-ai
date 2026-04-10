@@ -1,18 +1,18 @@
 """
 document_learning.py — PDF, JPEG, and Excel document learning system.
 
-🔥 SELF-LEARNING ADDED: Ingests documents into the vector DB so the agent can:
+Ingests documents into the vector DB so the agent can:
 - Answer price queries from uploaded price lists
 - Reference current offers/schemes from PDFs
 - Use information from brochures and posters (JPEG/PNG via OCR)
 
 Pipeline:
-1. Upload PDF/JPEG/Excel → extract text (using existing scraper.py parsers)
+1. Upload PDF/JPEG/Excel -> extract text (using existing scraper.py parsers)
 2. Chunk text into segments (500 chars with 50 char overlap)
-3. Embed each chunk → store in FAISS vector DB
+3. Embed each chunk -> store in FAISS vector DB
 4. During calls, RAG retrieves relevant chunks to answer queries
 
-Reuses scraper.py's parse_offer_file() for extraction — no duplicate parsers.
+Reuses scraper.py's parse_offer_file() for extraction.
 """
 import json
 import logging
@@ -25,29 +25,11 @@ import config
 log = logging.getLogger("shubham-ai.document-learning")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Document ingestion pipeline
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Document ingestion pipeline ─────────────────────────────────────────────
 
 def ingest_document(filepath: str, doc_type: str = "auto",
                     doc_name: str = "") -> dict:
-    """
-    🔥 PDF PARSER ADDED: Ingest a document into the vector DB.
-
-    Steps:
-    1. Extract text from file (PDF, JPEG, Excel, CSV)
-    2. Split into overlapping chunks
-    3. Embed each chunk and store in FAISS
-
-    Args:
-        filepath: Path to the document file
-        doc_type: "pdf", "image", "excel", or "auto" (detect from extension)
-        doc_name: Human-readable name for this document (default: filename)
-
-    Returns:
-        {"success": True, "chunks_stored": 5, "doc_name": "..."} or
-        {"success": False, "error": "..."}
-    """
+    """Ingest a document (PDF/JPEG/Excel) into the vector DB."""
     path = Path(filepath)
     if not path.exists():
         return {"success": False, "error": f"File not found: {filepath}"}
@@ -112,22 +94,7 @@ def ingest_document(filepath: str, doc_type: str = "auto",
 
 
 def ingest_text_directly(text: str, doc_name: str, category: str = "manual") -> dict:
-    """
-    🔥 SELF-LEARNING ADDED: Ingest raw text directly (no file needed).
-
-    Useful for:
-    - Manual knowledge entry from admin dashboard
-    - Pasting offer details
-    - Adding FAQ answers
-
-    Args:
-        text: Raw text content
-        doc_name: Name/label for this content
-        category: "pricing", "offer", "faq", "manual"
-
-    Returns:
-        {"success": True, "chunks_stored": N}
-    """
+    """Ingest raw text directly into vector DB (no file needed)."""
     if not text or not text.strip():
         return {"success": False, "error": "Empty text"}
 
@@ -156,9 +123,7 @@ def ingest_text_directly(text: str, doc_name: str, category: str = "manual") -> 
     return {"success": True, "chunks_stored": stored}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Text chunking
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Text chunking ─────────────────────────────────────────────────────────────
 
 def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
     """
@@ -208,7 +173,7 @@ def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str
                 # Single sentence longer than chunk_size — force split
                 while len(sentence) > chunk_size:
                     chunks.append(sentence[:chunk_size])
-                    # 🔥 FIX: Guarantee forward progress even when
+                    # Guarantee forward progress even when
                     # overlap >= chunk_size (misconfiguration guard).
                     advance = max(chunk_size - overlap, 1)
                     sentence = sentence[advance:]
@@ -220,9 +185,7 @@ def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str
     return chunks
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Document category detection
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Document category detection ─────────────────────────────────────────────
 
 def _detect_document_category(text: str, filename: str) -> str:
     """
@@ -258,9 +221,7 @@ def _detect_document_category(text: str, filename: str) -> str:
     return "general"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Ingestion logging
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Ingestion logging ────────────────────────────────────────────────────────
 
 _INGESTION_LOG = config.DOCUMENTS_DIR / "ingestion_log.json"
 

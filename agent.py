@@ -259,19 +259,14 @@ class ConversationManager:
         self.competitor_mentions: list[dict] = []
     
     def add_exchange(self, user_text: str, ai_text: str):
-        """
-        🔥 FIX: Record a user/AI exchange in history AND word counts.
-        Use this when bypassing chat() (e.g. intent matches, opening messages).
-        """
+        """Record a user/AI exchange in history AND word counts."""
         self.history.append({"role": "user", "content": user_text})
         self.history.append({"role": "assistant", "content": ai_text})
         self.user_word_count += len(user_text.split())
         self.ai_word_count += len(ai_text.split())
 
     def add_ai_message(self, ai_text: str):
-        """
-        🔥 FIX: Record an AI-only message (e.g. opening greeting) with word count.
-        """
+        """Record an AI-only message (e.g. opening greeting) with word count."""
         self.history.append({"role": "assistant", "content": ai_text})
         self.ai_word_count += len(ai_text.split())
 
