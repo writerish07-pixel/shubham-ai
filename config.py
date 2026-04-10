@@ -35,10 +35,9 @@ EXOTEL_APP_ID       = os.getenv("EXOTEL_APP_ID", "1186396")
 # -- AI / ML APIs -------------------------------------------------------------
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "").strip()
 
-# 🔥 OPTIMIZATION: Hybrid model routing — fast model for simple queries, smart model for complex
+# Hybrid model routing — fast model for simple queries, smart model for complex
 GROQ_FAST_MODEL     = os.getenv("GROQ_FAST_MODEL", "llama-3.1-8b-instant").strip()
 GROQ_SMART_MODEL    = os.getenv("GROQ_SMART_MODEL", "llama-3.3-70b-versatile").strip()
-# Keep original for backward compatibility
 GROQ_MODEL          = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
 DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "").strip()
@@ -82,37 +81,39 @@ SILENCE_TIMEOUT_SECONDS = int(os.getenv("SILENCE_TIMEOUT_SECONDS", "5"))
 PUBLIC_URL              = os.getenv("PUBLIC_URL", "http://localhost:5000").strip()
 PORT                    = int(os.getenv("PORT", "5000"))
 
-# 🔥 OPTIMIZATION: Latency tuning constants
-# Reduced timeouts to fail fast instead of hanging
-STT_TIMEOUT_SEC         = float(os.getenv("STT_TIMEOUT_SEC", "6.0"))
-LLM_TIMEOUT_SEC         = float(os.getenv("LLM_TIMEOUT_SEC", "5.0"))
-TTS_TIMEOUT_SEC         = float(os.getenv("TTS_TIMEOUT_SEC", "5.0"))
-RECORDING_DOWNLOAD_TIMEOUT = float(os.getenv("RECORDING_DOWNLOAD_TIMEOUT", "6.0"))
+# Latency tuning constants
+STT_TIMEOUT_SEC         = float(os.getenv("STT_TIMEOUT_SEC", "8.0"))
+LLM_TIMEOUT_SEC         = float(os.getenv("LLM_TIMEOUT_SEC", "6.0"))
+TTS_TIMEOUT_SEC         = float(os.getenv("TTS_TIMEOUT_SEC", "6.0"))
+RECORDING_DOWNLOAD_TIMEOUT = float(os.getenv("RECORDING_DOWNLOAD_TIMEOUT", "8.0"))
 
-# 🔥 FIX: Increased min tokens to prevent incomplete/broken sentences
-# Previous values (40/60) caused mid-sentence cutoffs like "aap konsi bike"
-# New values (80/120) allow complete Hindi sentences while staying brief
-LLM_MAX_TOKENS_FAST     = int(os.getenv("LLM_MAX_TOKENS_FAST", "80"))
-LLM_MAX_TOKENS_SMART    = int(os.getenv("LLM_MAX_TOKENS_SMART", "120"))
+# Token limits tuned for complete sentences without mid-sentence cutoffs
+LLM_MAX_TOKENS_FAST     = int(os.getenv("LLM_MAX_TOKENS_FAST", "100"))
+LLM_MAX_TOKENS_SMART    = int(os.getenv("LLM_MAX_TOKENS_SMART", "150"))
 
-# 🔥 FIX: Minimum tokens floor — talk ratio enforcement cannot reduce below this
-# Prevents broken sentences when AI talk ratio is high
-LLM_MIN_TOKENS_FLOOR    = int(os.getenv("LLM_MIN_TOKENS_FLOOR", "60"))
+# Minimum tokens floor — talk ratio enforcement cannot reduce below this
+LLM_MIN_TOKENS_FLOOR    = int(os.getenv("LLM_MIN_TOKENS_FLOOR", "80"))
 
-# 🔥 OPTIMIZATION: Thread pool size for async operations
 THREAD_POOL_SIZE        = int(os.getenv("THREAD_POOL_SIZE", "16"))
 
-# 🔥 FIX: WebSocket audio buffer — increased to collect full utterance before processing
-# Previous value (12000 = ~0.75s) caused AI to respond to partial speech
-# New value (24000 = ~1.5s) ensures user finishes speaking first
-WS_AUDIO_BUFFER_THRESHOLD = int(os.getenv("WS_AUDIO_BUFFER_THRESHOLD", "24000"))
+# WebSocket audio buffer — 32000 bytes = ~2s at 8kHz/16-bit mono
+WS_AUDIO_BUFFER_THRESHOLD = int(os.getenv("WS_AUDIO_BUFFER_THRESHOLD", "32000"))
 
-# 🔥 FIX: End-of-speech silence detection (milliseconds)
-# AI waits this long after last audio before considering speech complete
-END_OF_SPEECH_SILENCE_MS  = int(os.getenv("END_OF_SPEECH_SILENCE_MS", "600"))
+# End-of-speech silence detection (700ms = balanced between interruption and sluggishness)
+END_OF_SPEECH_SILENCE_MS  = int(os.getenv("END_OF_SPEECH_SILENCE_MS", "700"))
 
-# 🔥 FIX: Minimum audio bytes to consider as valid speech (filters noise)
-MIN_SPEECH_BYTES          = int(os.getenv("MIN_SPEECH_BYTES", "6000"))
+# Minimum audio bytes to consider as valid speech (filters noise/breathing)
+MIN_SPEECH_BYTES          = int(os.getenv("MIN_SPEECH_BYTES", "8000"))
+
+# User interrupt detection — AI stops speaking when user starts
+AI_INTERRUPT_ENABLED      = os.getenv("AI_INTERRUPT_ENABLED", "true").strip().lower() == "true"
+
+# Response validation — retry incomplete responses up to N times
+MAX_RESPONSE_RETRIES      = int(os.getenv("MAX_RESPONSE_RETRIES", "1"))
+
+# Talk ratio target — AI 30%, customer 70%
+TALK_RATIO_TARGET         = float(os.getenv("TALK_RATIO_TARGET", "0.30"))
+TALK_RATIO_HARD_LIMIT     = float(os.getenv("TALK_RATIO_HARD_LIMIT", "0.40"))
 
 
 # ── Self-learning system ─────────────────────────────────────────────────────

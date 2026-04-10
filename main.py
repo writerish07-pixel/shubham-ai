@@ -705,26 +705,30 @@ async def intelligence_summary():
 
 async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket: WebSocket, state: dict):
     """
-    🔥 FIX: Fully async speech processing pipeline with turn-taking:
+    Fully async speech processing pipeline with strict turn-taking:
     1. PCM → WAV conversion (CPU-bound, thread pool)
     2. Async STT (no thread pool)
     3. Intent detection (instant, O(1) + fuzzy fallback)
-    4. If no intent → Hybrid model LLM (thread pool for sync Groq client)
-    5. Response validation (ensures complete sentences)
-    6. Phrase cache check (instant)
-    7. If no cache → Async TTS (no thread pool)
-    8. PCM conversion + send (thread pool for pydub)
+    4. If no intent → Hybrid model LLM with response validation
+    5. Phrase cache check (instant)
+    6. If no cache → Async TTS (no thread pool)
+    7. PCM conversion + send (thread pool for pydub)
     """
     session = active_calls.get(call_sid)
     if not session:
         return
-    # 🔥 FIX: Minimum speech buffer to filter noise/partial speech
+    # Filter noise/partial speech
     if len(buf) < config.MIN_SPEECH_BYTES:
         return
     if _is_silence(buf):
         return
     
-    # 🔥 FIX: Mark user as no longer speaking (speech processing started)
+    # STRICT TURN-TAKING: Only respond if user has STOPPED speaking
+    if session.get("is_user_speaking", False):
+        return
+    
+    # Mark speech_final — user has finished speaking, AI can respond
+    session["speech_final"] = True
     session["is_user_speaking"] = False
 
     try:
@@ -733,45 +737,55 @@ async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket:
         if not wav_bytes:
             return
 
-        # 2. 🔥 OPTIMIZATION: Async STT — direct async call, no thread pool
+        # 2. Async STT — direct async call, no thread pool
         stt_result = await transcribe_audio_async(wav_bytes, "hi-IN")
         customer_text = stt_result.get("text", "").strip() if stt_result else ""
 
         if not customer_text:
             return
 
+        # STRICT: Check again if user started speaking during STT processing
+        if session.get("is_user_speaking", False):
+            print("[Voicebot] User started speaking during STT — aborting response")
+            return
+
         detected_lang = stt_result.get("language", "hinglish")
         session["language"] = detected_lang
 
-        # 3. 🔥 OPTIMIZATION: Intent detection first (instant, no API call)
+        # 3. Intent detection first (instant, no API call)
         from intent import detect_intent
         conv = session["conversation"]
 
         intent_response = detect_intent(customer_text, lead=session.get("lead"))
         if intent_response:
             voice_text = intent_response
-            # 🔥 FIX: Use add_exchange to track word counts for talk ratio
             conv.add_exchange(customer_text, voice_text)
         else:
-            # 4. 🔥 OPTIMIZATION: Hybrid model routing (inside conv.chat)
+            # 4. Hybrid model LLM with response validation (inside conv.chat)
             ai_reply = await _run(conv.chat, customer_text, timeout=config.LLM_TIMEOUT_SEC)
             voice_text = re.sub(r"\{.*", "", ai_reply, flags=re.DOTALL).strip() if ai_reply else ""
             if not voice_text:
-                voice_text = "Ji, samajh rahi hoon. Thoda detail dein?"
-                # 🔥 FIX: Record fallback on timeout so orphaned thread's
-                # late append is blocked by the history length guard.
+                voice_text = "Ji, samajh rahi hoon. Aap bataaiye?"
                 if ai_reply is None:
                     conv.add_ai_message(voice_text)
 
         print(f"[Voicebot] Priya: {voice_text[:120]}")
 
-        # 5. 🔥 OPTIMIZATION: Check phrase cache (instant)
+        # STRICT: Check AGAIN before sending audio — if user interrupted, abort
+        if session.get("is_user_speaking", False):
+            print("[Voicebot] User interrupted before TTS send — aborting")
+            return
+
+        # Mark AI as speaking
+        session["is_ai_speaking"] = True
+
+        # 5. Check phrase cache (instant)
         from phrase_cache import get_cached_audio
         pcm = get_cached_audio(voice_text)
         if pcm:
             print(f"[PhraseCache] Serving cached ({len(pcm)} bytes)")
         else:
-            # 6. 🔥 OPTIMIZATION: Async TTS — no thread pool
+            # 6. Async TTS — no thread pool
             audio = await synthesize_speech_async(voice_text, detected_lang)
             if audio:
                 # 7. PCM conversion (CPU-bound, thread pool)
@@ -786,10 +800,17 @@ async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket:
             }))
             print(f"[Voicebot] Sent response ({len(pcm)} bytes)")
             response_secs = len(pcm) / 16000
-            state["listen_after"] = time.monotonic() + response_secs + 0.5  # 🔥 OPTIMIZATION: Reduced gap from 0.8 to 0.5
+            state["listen_after"] = time.monotonic() + response_secs + 0.5
+
+        # Mark AI as done speaking
+        session["is_ai_speaking"] = False
+        session["speech_final"] = False
 
     except Exception as e:
         print(f"[Voicebot] _process_speech error: {e}")
+        if session:
+            session["is_ai_speaking"] = False
+            session["speech_final"] = False
 
 
 @app.websocket("/call/stream")
@@ -802,7 +823,7 @@ async def voicebot_stream(websocket: WebSocket):
     audio_buffer = b""
     state = {"listen_after": 0.0}
     _busy = [False]
-    # 🔥 FIX: End-of-speech silence detection
+    # End-of-speech silence detection
     _last_audio_time = [0.0]  # Timestamp of last non-silence audio chunk
     _speech_detected = [False]  # Whether any speech has been detected in current buffer
 
@@ -838,18 +859,13 @@ async def voicebot_stream(websocket: WebSocket):
                 session = active_calls.get(call_sid)
 
                 if session:
-                    # 🔥 FIX: Use session's actual is_inbound flag instead of hardcoded True
-                    # so outbound WebSocket calls get personalized greetings
                     greeting = get_opening_message(session.get("lead"), is_inbound=session.get("is_inbound", True))
-                    # 🔥 FIX: Use add_ai_message to track word counts for talk ratio
                     session["conversation"].add_ai_message(greeting)
 
-                    # 🔥 FIX: Only use cached PCM if this is a generic inbound greeting
-                    # Outbound calls have personalized greetings that differ from the cached audio
+                    # Use cached PCM for generic inbound greeting, otherwise TTS
                     cached_greeting = get_opening_message(None, is_inbound=True)
                     pcm = _greeting_pcm_cache.get("data") if greeting == cached_greeting else None
                     if not pcm:
-                        # 🔥 OPTIMIZATION: Async TTS
                         audio = await synthesize_speech_async(greeting, "hinglish")
                         if audio:
                             pcm = await _run(_mp3_to_pcm, audio, timeout=3.0)
@@ -862,7 +878,7 @@ async def voicebot_stream(websocket: WebSocket):
                             "media": {"payload": b64}
                         }))
                         greeting_secs = len(pcm) / 16000
-                        state["listen_after"] = time.monotonic() + greeting_secs + 0.5  # 🔥 OPTIMIZATION: 0.5s gap (was 1.0)
+                        state["listen_after"] = time.monotonic() + greeting_secs + 0.5
                         print(f"[Voicebot] Sent greeting ({len(pcm)} bytes)")
                         await websocket.send_text(json.dumps({
                             "event": "mark",
@@ -883,25 +899,43 @@ async def voicebot_stream(websocket: WebSocket):
                 audio_buffer += chunk
                 now = time.monotonic()
 
-                # 🔥 FIX: End-of-speech detection using silence gap
-                # Check if this chunk contains actual speech (not silence)
+                # End-of-speech detection using silence gap
                 chunk_is_speech = not _is_silence(chunk, threshold=300)
                 if chunk_is_speech:
                     _last_audio_time[0] = now
                     _speech_detected[0] = True
-                    # 🔥 FIX: Mark user as speaking — AI must not respond yet
+                    # STRICT: Mark user as speaking — AI must not respond
                     session = active_calls.get(call_sid)
                     if session:
                         session["is_user_speaking"] = True
+                        session["speech_final"] = False
+                        # USER INTERRUPT: If AI is speaking and user starts, stop AI
+                        if session.get("is_ai_speaking", False) and config.AI_INTERRUPT_ENABLED:
+                            session["is_ai_speaking"] = False
+                            print("[Voicebot] USER INTERRUPT — AI stopped")
+                            # Send clear event to stop playback
+                            try:
+                                await websocket.send_text(json.dumps({
+                                    "event": "clear",
+                                    "stream_sid": stream_sid
+                                }))
+                            except Exception:
+                                pass
 
-                # 🔥 FIX: Only process when BOTH conditions are met:
-                # 1. We have enough audio data (buffer threshold)
+                # STRICT TURN-TAKING: Only process when BOTH conditions met:
+                # 1. Enough audio data (buffer threshold)
                 # 2. User has STOPPED speaking (silence gap detected)
                 silence_gap_ms = (now - _last_audio_time[0]) * 1000 if _last_audio_time[0] > 0 else 0
                 has_enough_audio = len(audio_buffer) >= config.WS_AUDIO_BUFFER_THRESHOLD
                 speech_ended = _speech_detected[0] and silence_gap_ms >= config.END_OF_SPEECH_SILENCE_MS
 
                 if has_enough_audio and speech_ended and not _busy[0]:
+                    # Mark user as done speaking
+                    session = active_calls.get(call_sid)
+                    if session:
+                        session["is_user_speaking"] = False
+                        session["speech_final"] = True
+
                     buf = audio_buffer
                     audio_buffer = b""
                     _speech_detected[0] = False
@@ -917,7 +951,7 @@ async def voicebot_stream(websocket: WebSocket):
 
                     asyncio.create_task(handle_speech())
                 
-                # 🔥 FIX: Prevent infinite buffer growth — cap at 5x threshold
+                # Prevent infinite buffer growth — cap at 5x threshold
                 elif len(audio_buffer) > config.WS_AUDIO_BUFFER_THRESHOLD * 5:
                     audio_buffer = audio_buffer[-config.WS_AUDIO_BUFFER_THRESHOLD:]
 
