@@ -179,8 +179,11 @@ def validate_config() -> list:
         warnings.append("SARVAM_API_KEY is not set -- TTS/STT will fall back to Deepgram only")
     if not DEEPGRAM_API_KEY:
         warnings.append("DEEPGRAM_API_KEY is not set -- STT fallback unavailable")
-    if PUBLIC_URL == "http://localhost:5000":
-        warnings.append("PUBLIC_URL is localhost -- Exotel webhooks require a public URL (use ngrok)")
+    if PUBLIC_URL == "http://localhost:5000" or "localhost" in PUBLIC_URL:
+        warnings.append(
+            "PUBLIC_URL is localhost -- Exotel callbacks will fail. "
+            "Set PUBLIC_URL env var to your Render/ngrok URL, or it will be auto-detected from the first incoming request."
+        )
     if not SALES_TEAM:
         warnings.append("No salesperson configured -- hot lead assignment disabled")
     return warnings

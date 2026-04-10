@@ -128,12 +128,34 @@ app = FastAPI(title="Shubham Motors AI Agent (Optimized)", version="3.0.0", life
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 _greeting_pcm_cache = {}
-# 🔥 FIX: Define _pending_outbound inline (state.py doesn't exist in repo)
 _pending_outbound: set[str] = set()
 
-# 🔥 OPTIMIZATION: Thread pool only for CPU-bound work (audio conversion)
-# I/O operations now use async httpx directly
+# Thread pool only for CPU-bound work (audio conversion)
 _executor = ThreadPoolExecutor(max_workers=config.THREAD_POOL_SIZE)
+
+
+def _get_public_url(request: Request) -> str:
+    """Return the public URL for Exotel callbacks.
+
+    If PUBLIC_URL is explicitly set in .env (not the localhost default),
+    use that.  Otherwise auto-detect from the incoming request so that
+    deployments on Render / Railway / etc. work without manual config.
+    """
+    configured = config.PUBLIC_URL
+    if configured and "localhost" not in configured and "127.0.0.1" not in configured:
+        return configured.rstrip("/")
+
+    # Auto-detect from request headers (Render sets X-Forwarded-Proto/Host)
+    scheme = request.headers.get("x-forwarded-proto", "https")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    if host:
+        detected = f"{scheme}://{host}"
+        # Cache it so subsequent calls (audio serving, etc.) also use it
+        config.PUBLIC_URL = detected
+        print(f"[Config] AUTO-DETECTED PUBLIC_URL: {detected}")
+        return detected
+
+    return configured
 
 
 # ── HEALTH ─────────────────────────────────────────────────────────────────────
@@ -252,7 +274,10 @@ async def incoming_call(request: Request, background_tasks: BackgroundTasks):
     call_sid = data.get("CallSid", "").strip()
     caller   = data.get("From", "").strip()
 
-    print(f"\n[Incoming] Call from {caller} | SID: {call_sid}")
+    # Auto-detect public URL from request if not configured
+    public_url = _get_public_url(request)
+
+    print(f"\n[Incoming] Call from {caller} | SID: {call_sid} | URL: {public_url}")
 
     if not call_sid:
         return Response(
@@ -262,12 +287,11 @@ async def incoming_call(request: Request, background_tasks: BackgroundTasks):
 
     start_call_session(call_sid, caller, direction="inbound")
 
-    # 🔥 OPTIMIZATION: Shorter greeting — less TTS latency
     greeting = "Namaste! Main Priya, Shubham Motors se. Kaise madad karoon?"
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say language="hi-IN">{_xml_safe(greeting)}</Say>
-  <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+  <Record action="{public_url}/call/gather/{call_sid}"
           method="POST"
           maxLength="60"
           timeout="10"
@@ -283,6 +307,9 @@ async def outbound_call_handler(request: Request):
     call_sid = form.get("CallSid", "").strip()
     called   = form.get("To", "").strip()
     lead_id  = form.get("CustomField", "").strip()
+
+    # Auto-detect public URL from request if not configured
+    _get_public_url(request)
 
     print(f"\n[Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
 
@@ -322,16 +349,11 @@ async def outbound_call_handler(request: Request):
 
 @app.post("/call/gather/{call_sid}")
 async def handle_gather(call_sid: str, request: Request):
-    """
-    🔥 OPTIMIZATION: Completely rewritten gather handler with:
-    - Async recording download (no thread pool)
-    - Async STT (no thread pool)
-    - Parallel intent detection during STT
-    - Hybrid model routing for LLM
-    - Async TTS (no thread pool)
-    - Total pipeline: ~1.2-2.0s (was ~3-5s)
-    """
+    """Gather handler: download recording → STT → intent/LLM → TTS → respond."""
     try:
+        # Ensure PUBLIC_URL is resolved (safety net for edge cases)
+        _get_public_url(request)
+
         form = await request.form()
 
         recording_url = form.get("RecordingUrl", "").strip()
