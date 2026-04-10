@@ -128,12 +128,51 @@ app = FastAPI(title="Shubham Motors AI Agent (Optimized)", version="3.0.0", life
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 _greeting_pcm_cache = {}
-# 🔥 FIX: Define _pending_outbound inline (state.py doesn't exist in repo)
 _pending_outbound: set[str] = set()
 
-# 🔥 OPTIMIZATION: Thread pool only for CPU-bound work (audio conversion)
-# I/O operations now use async httpx directly
+# Thread pool only for CPU-bound work (audio conversion)
 _executor = ThreadPoolExecutor(max_workers=config.THREAD_POOL_SIZE)
+
+
+# Trusted hosting domains for auto-detection (prevents host header poisoning)
+_TRUSTED_HOST_SUFFIXES = (
+    ".onrender.com",
+    ".railway.app",
+    ".herokuapp.com",
+    ".fly.dev",
+    ".ngrok-free.app",
+    ".ngrok.io",
+)
+
+
+def _get_public_url(request: Request) -> str:
+    """Return the public URL for Exotel callbacks.
+
+    If PUBLIC_URL is explicitly set in .env (not the localhost default),
+    use that.  Otherwise auto-detect from the X-Forwarded-Host header
+    set by reverse proxies (Render, Railway, etc.).  Only trusts hosts
+    matching known hosting platform domains to prevent header poisoning.
+    """
+    configured = config.PUBLIC_URL
+    if configured and "localhost" not in configured and "127.0.0.1" not in configured:
+        return configured.rstrip("/")
+
+    # Only trust X-Forwarded-Host (set by reverse proxies), not raw Host header
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").strip()
+    if not forwarded_host:
+        return configured
+
+    # Validate against trusted hosting domains
+    host_lower = forwarded_host.lower().split(":")[0]  # strip port if present
+    if not any(host_lower.endswith(suffix) for suffix in _TRUSTED_HOST_SUFFIXES):
+        print(f"[Config] WARNING: Untrusted X-Forwarded-Host '{forwarded_host}' — ignoring")
+        return configured
+
+    scheme = request.headers.get("x-forwarded-proto", "https")
+    detected = f"{scheme}://{forwarded_host}"
+    config.PUBLIC_URL = detected
+    print(f"[Config] AUTO-DETECTED PUBLIC_URL: {detected}")
+    return detected
 
 
 # ── HEALTH ─────────────────────────────────────────────────────────────────────
@@ -252,7 +291,10 @@ async def incoming_call(request: Request, background_tasks: BackgroundTasks):
     call_sid = data.get("CallSid", "").strip()
     caller   = data.get("From", "").strip()
 
-    print(f"\n[Incoming] Call from {caller} | SID: {call_sid}")
+    # Auto-detect public URL from request if not configured
+    public_url = _get_public_url(request)
+
+    print(f"\n[Incoming] Call from {caller} | SID: {call_sid} | URL: {public_url}")
 
     if not call_sid:
         return Response(
@@ -262,12 +304,11 @@ async def incoming_call(request: Request, background_tasks: BackgroundTasks):
 
     start_call_session(call_sid, caller, direction="inbound")
 
-    # 🔥 OPTIMIZATION: Shorter greeting — less TTS latency
     greeting = "Namaste! Main Priya, Shubham Motors se. Kaise madad karoon?"
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say language="hi-IN">{_xml_safe(greeting)}</Say>
-  <Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+  <Record action="{public_url}/call/gather/{call_sid}"
           method="POST"
           maxLength="60"
           timeout="10"
@@ -283,6 +324,9 @@ async def outbound_call_handler(request: Request):
     call_sid = form.get("CallSid", "").strip()
     called   = form.get("To", "").strip()
     lead_id  = form.get("CustomField", "").strip()
+
+    # Auto-detect public URL from request if not configured
+    _get_public_url(request)
 
     print(f"\n[Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
 
@@ -322,16 +366,11 @@ async def outbound_call_handler(request: Request):
 
 @app.post("/call/gather/{call_sid}")
 async def handle_gather(call_sid: str, request: Request):
-    """
-    🔥 OPTIMIZATION: Completely rewritten gather handler with:
-    - Async recording download (no thread pool)
-    - Async STT (no thread pool)
-    - Parallel intent detection during STT
-    - Hybrid model routing for LLM
-    - Async TTS (no thread pool)
-    - Total pipeline: ~1.2-2.0s (was ~3-5s)
-    """
+    """Gather handler: download recording → STT → intent/LLM → TTS → respond."""
     try:
+        # Ensure PUBLIC_URL is resolved (safety net for edge cases)
+        _get_public_url(request)
+
         form = await request.form()
 
         recording_url = form.get("RecordingUrl", "").strip()
@@ -567,6 +606,9 @@ async def import_leads(file: UploadFile = File(...)):
 
 @app.post("/api/call/make")
 async def trigger_call(request: Request, background_tasks: BackgroundTasks):
+    # Ensure PUBLIC_URL is resolved before triggering outbound call
+    _get_public_url(request)
+
     data    = await request.json()
     lead_id = data.get("lead_id", "")
     mobile  = data.get("mobile", "")
