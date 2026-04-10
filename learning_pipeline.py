@@ -1,14 +1,14 @@
 """
 learning_pipeline.py — Post-call learning pipeline for self-learning agent.
 
-🔥 SELF-LEARNING ADDED: Extracts structured knowledge from every call:
+Extracts structured knowledge from every call:
 - Customer intent (what they want)
 - Objections raised (price, comparison, delay, etc.)
 - Buying signals (test ride, EMI inquiry, visit intent)
 - Loss reasons (competitor brand/dealer, why they left)
 - Successful handling patterns (what worked in past calls)
 
-Runs ASYNCHRONOUSLY after each call ends — zero impact on call latency.
+Runs ASYNCHRONOUSLY after each call ends -- zero impact on call latency.
 Results are stored in vector DB (memory_learning.py) for RAG retrieval.
 """
 import asyncio
@@ -23,9 +23,7 @@ import config
 log = logging.getLogger("shubham-ai.learning")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Transcript analyzer using Groq LLM
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Transcript analyzer using Groq LLM ──────────────────────────────────────
 
 _ANALYSIS_PROMPT = """You are a sales intelligence analyzer for a Hero two-wheeler dealership (Shubham Motors, Jaipur).
 
@@ -56,27 +54,13 @@ IMPORTANT:
 TRANSCRIPT:
 """
 
-# 🔥 FIX: Use string concatenation instead of str.format() to avoid
-# KeyError/ValueError when transcripts contain curly braces (which LLM
-# JSON responses frequently do).
+# Note: Use string concatenation instead of str.format() to avoid
+# KeyError/ValueError when transcripts contain curly braces.
 
 
 async def analyze_call_transcript(transcript: str, call_sid: str = "",
                                    caller: str = "") -> Optional[dict]:
-    """
-    🔥 SELF-LEARNING ADDED: Analyze a call transcript using Groq LLM.
-
-    Runs asynchronously — meant to be called in a background task after call ends.
-    Uses the smart model (70B) for better analysis quality.
-
-    Args:
-        transcript: Full call transcript text
-        call_sid: Call session ID for logging
-        caller: Caller phone number
-
-    Returns:
-        Structured analysis dict, or None on failure.
-    """
+    """Analyze a call transcript using Groq LLM (async, background only)."""
     if not transcript or len(transcript.strip()) < 20:
         log.info("Transcript too short to analyze (call %s)", call_sid)
         return None
@@ -95,7 +79,7 @@ async def analyze_call_transcript(transcript: str, call_sid: str = "",
         from groq import Groq
         client = Groq(api_key=config.GROQ_API_KEY)
 
-        # 🔥 SELF-LEARNING ADDED: Use smart model for analysis (runs in background, latency ok)
+        # Use smart model for analysis (runs in background, latency ok)
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
             model=config.GROQ_SMART_MODEL,
@@ -124,11 +108,9 @@ async def analyze_call_transcript(transcript: str, call_sid: str = "",
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Store learnings in vector DB + JSON
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Store learnings in vector DB + JSON ───────────────────────────────────────
 
-# 🔥 SELF-LEARNING ADDED: Module-level lock for thread-safe file writes
+# Module-level lock for thread-safe file writes
 _file_lock = __import__('threading').Lock()
 
 
@@ -147,17 +129,13 @@ def _append_json(filepath: Path, entry: dict):
 
 async def process_call_learning(transcript: str, call_sid: str = "",
                                  caller: str = "", call_duration: int = 0):
-    """
-    🔥 SELF-LEARNING ADDED: Complete post-call learning pipeline.
+    """Complete post-call learning pipeline (async, background only).
 
-    Called as a background task after every call ends. Steps:
+    Steps:
     1. Analyze transcript with Groq LLM
-    2. Store key learning in vector DB for RAG
-    3. Store objections in vector DB
-    4. Store competitor/loss data for sales intelligence
-    5. Log everything to JSON files for analytics
-
-    This function is async and non-blocking — does NOT affect call latency.
+    2. Store key learning + objections + buying signals in vector DB for RAG
+    3. Store competitor/loss data for sales intelligence
+    4. Log everything to JSON files for analytics
     """
     if not config.LEARNING_ENABLED:
         return
@@ -265,9 +243,7 @@ async def process_call_learning(transcript: str, call_sid: str = "",
     log.info("Learning pipeline completed for call %s in %.1fs", call_sid, elapsed)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Build transcript from conversation history
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Build transcript from conversation history ─────────────────────────────
 
 def build_transcript(conversation_history: list[dict]) -> str:
     """

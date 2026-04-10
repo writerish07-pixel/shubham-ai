@@ -1,9 +1,9 @@
 """
 sales_intelligence.py — Sales intelligence system for tracking competitor losses.
 
-🔥 SELF-LEARNING ADDED: Tracks and analyzes why customers buy from:
-1. Competitor BRANDS (Honda, Bajaj, TVS, etc.) — captures WHY they chose another brand
-2. Competitor DEALERS (other Hero dealers) — captures WHY they went to another dealer
+Tracks and analyzes why customers buy from:
+1. Competitor BRANDS (Honda, Bajaj, TVS, etc.) -- captures WHY they chose another brand
+2. Competitor DEALERS (other Hero dealers) -- captures WHY they went to another dealer
 
 Stores structured data for analytics:
 - Date, model interested, competitor, loss reason, loss category
@@ -26,30 +26,13 @@ log = logging.getLogger("shubham-ai.intelligence")
 _file_lock = threading.Lock()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Competitor loss logging
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Competitor loss logging ──────────────────────────────────────────────────
 
 async def log_competitor_loss(call_sid: str, caller: str,
                                competitor_brand: str, competitor_model: str,
                                loss_reason: str, loss_category: str,
                                interested_model: str, bought_elsewhere: bool):
-    """
-    🔥 SALES INTELLIGENCE LOGIC: Log a competitive loss event.
-
-    Called by learning_pipeline.py when a customer mentions buying from
-    a competitor brand or dealer.
-
-    Args:
-        call_sid: Call session ID
-        caller: Customer phone number
-        competitor_brand: Name of competitor brand (e.g., "honda", "bajaj")
-        competitor_model: Specific competitor model (e.g., "Activa 6G")
-        loss_reason: Free-text reason for the loss
-        loss_category: Categorized reason (price, mileage, brand_trust, etc.)
-        interested_model: Hero model the customer was interested in
-        bought_elsewhere: True if customer confirmed they bought from competitor
-    """
+    """Log a competitive loss event (called from learning pipeline)."""
     entry = {
         "call_sid": call_sid,
         "caller": caller,
@@ -111,20 +94,10 @@ def _append_to_file(filepath: Path, entry: dict):
         filepath.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Analytics and insights
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Analytics and insights ───────────────────────────────────────────────────
 
 def get_loss_summary() -> dict:
-    """
-    🔥 SALES INTELLIGENCE LOGIC: Get aggregated loss analytics.
-
-    Returns structured insights:
-    - Top competitor brands
-    - Top loss reasons
-    - Most lost Hero models
-    - Trend data
-    """
+    """Get aggregated loss analytics (top competitors, reasons, models)."""
     brand_losses = _load_file(config.COMPETITOR_LOSSES_FILE)
     dealer_losses = _load_file(config.DEALER_LOSSES_FILE)
 
@@ -161,14 +134,7 @@ def get_loss_summary() -> dict:
 
 
 def get_competitor_insights(brand: str) -> dict:
-    """
-    🔥 SALES INTELLIGENCE LOGIC: Get detailed insights for a specific competitor.
-
-    Returns:
-    - All loss reasons for this competitor
-    - Which Hero models are losing to them
-    - Common objections when this competitor is mentioned
-    """
+    """Get detailed insights for a specific competitor brand."""
     brand_lower = brand.lower().strip()
     losses = _load_file(config.COMPETITOR_LOSSES_FILE)
     filtered = [l for l in losses if l.get("competitor_brand", "").lower() == brand_lower]
@@ -203,11 +169,9 @@ def _load_file(filepath: Path) -> list:
         return []
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 🔥 SELF-LEARNING ADDED: Real-time competitor detection for live calls
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Real-time competitor detection for live calls ───────────────────────
 
-# 🔥 FIX: Pre-compile word-boundary regex for each competitor brand.
+# Pre-compile word-boundary regex for each competitor brand.
 # Plain substring matching caused false positives: "ola" matched "bola"
 # (Hindi for "said"), "jawa" matched "jawab" (Hindi for "answer").
 import re as _re
@@ -218,18 +182,7 @@ _COMPETITOR_BRAND_RE = _re.compile(
 
 
 def detect_competitor_mention(text: str) -> Optional[dict]:
-    """
-    🔥 SALES INTELLIGENCE LOGIC: Detect competitor brand/model mentions in text.
-
-    Uses word-boundary regex — used during live calls for real-time alerts.
-
-    Args:
-        text: Customer's spoken text
-
-    Returns:
-        {"brand": "honda", "context": "customer comparing with Honda Activa"}
-        or None if no competitor detected.
-    """
+    """Detect competitor brand mentions in text (real-time, word-boundary regex)."""
     m = _COMPETITOR_BRAND_RE.search(text)
     if m:
         return {

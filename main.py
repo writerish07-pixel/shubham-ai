@@ -92,11 +92,35 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_build_phrase_cache())
 
+    # Preload self-learning system (embedding model + FAISS index)
+    if config.LEARNING_ENABLED:
+        async def _preload_learning():
+            await asyncio.sleep(3)
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(_executor, _init_learning_system)
+            except Exception as e:
+                print(f"[Startup] Learning system preload failed: {e}")
+
+        asyncio.create_task(_preload_learning())
+
     yield
 
     print("\n[Shutdown] Stopping scheduler...")
     stop_scheduler()
     print("[Shutdown] Done")
+
+
+def _init_learning_system():
+    """Preload embedding model + FAISS index so first RAG query is fast."""
+    try:
+        import memory_learning as memory
+        memory._get_embedding_model()
+        memory._get_faiss_index()
+        stats = memory.get_stats()
+        print(f"[Startup] Learning system ready: {stats.get('total_vectors', 0)} vectors in FAISS")
+    except Exception as e:
+        print(f"[Startup] Learning system init failed (non-fatal): {e}")
 
 
 # ── App setup ──────────────────────────────────────────────────────────────────
@@ -701,6 +725,51 @@ async def intelligence_summary():
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/api/learning/verify")
+async def learning_verify(test_text: str = "Splendor Plus ki price kitni hai?"):
+    """Verify learning system end-to-end: store a test entry, retrieve it via RAG.
+
+    This proves the pipeline works: embed -> store -> search -> retrieve.
+    """
+    if not config.LEARNING_ENABLED:
+        return JSONResponse({"success": False, "error": "Learning disabled"}, status_code=400)
+
+    try:
+        import memory_learning as memory
+        import time as _time
+
+        # Step 1: Store a test learning
+        test_learning = f"Verification test: {test_text}"
+        stored = memory.store_learning(test_learning, {
+            "type": "verification",
+            "source": "api_verify",
+            "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+        # Step 2: Retrieve it via RAG
+        results = memory.retrieve_relevant(test_text, top_k=3)
+        found = any("Verification test" in r.get("text", "") for r in results)
+
+        # Step 3: Get formatted context (what the agent would see)
+        context = memory.get_relevant_context(test_text)
+
+        # Step 4: Get stats
+        stats = memory.get_stats()
+
+        return JSONResponse({
+            "success": True,
+            "stored": stored,
+            "retrieved": found,
+            "retrieval_results": len(results),
+            "top_score": results[0]["score"] if results else 0,
+            "rag_context_preview": context[:300] if context else "(empty)",
+            "vector_db_stats": stats,
+            "verdict": "WORKING" if stored and found else "PARTIAL" if stored else "FAILED",
+        })
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 # ── VOICEBOT WEBSOCKET (OPTIMIZED) ───────────────────────────────────────────
 
 async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket: WebSocket, state: dict):
@@ -751,6 +820,17 @@ async def _process_speech(buf: bytes, call_sid: str, stream_sid: str, websocket:
 
         detected_lang = stt_result.get("language", "hinglish")
         session["language"] = detected_lang
+
+        # Real-time competitor detection (non-blocking)
+        try:
+            from sales_intelligence import detect_competitor_mention
+            competitor = detect_competitor_mention(customer_text)
+            if competitor:
+                conv = session["conversation"]
+                conv.competitor_mentions.append(competitor)
+                print(f"[Voicebot] Competitor detected: {competitor['brand']}")
+        except Exception:
+            pass
 
         # 3. Intent detection first (instant, no API call)
         from intent import detect_intent
@@ -980,9 +1060,19 @@ def _encode_pcm(pcm_bytes: bytes) -> str:
     return base64.b64encode(pcm_bytes).decode("utf-8")
 
 
-# 🔥 FIX: Copied from main.py to avoid importing main.py which triggers
-# module-level side effects (ThreadPoolExecutor, second FastAPI app, duplicate imports)
 def _render_dashboard(stats: dict, leads: list) -> str:
+    # Fetch learning stats for dashboard
+    learning_vectors = 0
+    learning_types = {}
+    learning_enabled = config.LEARNING_ENABLED
+    try:
+        import memory_learning as _mem
+        _lstats = _mem.get_stats()
+        learning_vectors = _lstats.get("total_vectors", 0)
+        learning_types = _lstats.get("type_counts", {})
+    except Exception:
+        pass
+
     badge = {
         "hot": "🔥", "warm": "🟡", "cold": "❄️",
         "dead": "☠️", "converted": "✅", "new": "🆕", "active": "📞"
@@ -1074,6 +1164,8 @@ input,select,textarea{{width:100%;background:#252540;border:1px solid #3a3a5a;co
   <div class="card"><div class="num" style="color:#44cc44">{stats.get('converted',0)}</div><div class="lbl">\u2705 Converted</div></div>
   <div class="card"><div class="num" style="color:#777">{stats.get('dead',0)}</div><div class="lbl">\u2620\ufe0f Dead</div></div>
   <div class="card"><div class="num" style="color:#44aaff">{stats.get('new',0)}</div><div class="lbl">\U0001f195 New</div></div>
+  <div class="card" style="border-color:#5a3a8a"><div class="num" style="color:#bb88ff">{learning_vectors}</div><div class="lbl">\U0001f9e0 Learnings</div></div>
+  <div class="card" style="border-color:#3a5a3a"><div class="num" style="color:#88dd88">{'ON' if learning_enabled else 'OFF'}</div><div class="lbl">\U0001f4a1 Self-Learn</div></div>
 </div>
 
 <div class="section">
