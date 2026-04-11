@@ -213,6 +213,9 @@ def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> st
         content = f"<Play>{play_url}</Play>"
     elif say_text:
         content = f'<Say language="hi-IN" voice="woman">{_xml_safe(say_text)}</Say>'
+    else:
+        # Never return silent turns to PSTN leg.
+        content = '<Say language="hi-IN" voice="woman">Ji, ek second.</Say>'
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -320,7 +323,10 @@ async def incoming_call(request: Request, background_tasks: BackgroundTasks):
 
 @app.api_route("/call/handler", methods=["GET", "POST"])
 async def outbound_call_handler(request: Request):
-    form = await request.form()
+    if request.method == "GET":
+        form = request.query_params
+    else:
+        form = await request.form()
     call_sid = form.get("CallSid", "").strip()
     called   = form.get("To", "").strip()
     lead_id  = form.get("CustomField", "").strip()
@@ -338,8 +344,9 @@ async def outbound_call_handler(request: Request):
 
     opening_url = None
     try:
-        # 🔥 OPTIMIZATION: Reduced timeout from 8s to 6s
-        opening_audio = await _run(get_opening_audio, call_sid, timeout=6.0)
+        # Keep webhook response fast to avoid Exotel ring-time disconnects.
+        # If greeting generation is slow, we fall back to <Say> immediately.
+        opening_audio = await _run(get_opening_audio, call_sid, timeout=1.2)
         if opening_audio:
             opening_path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
             opening_path.write_bytes(opening_audio)
