@@ -78,8 +78,11 @@ def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
     call_handler_url = f"{config.PUBLIC_URL}/call/handler"
     
     payload = {
-        "From": to_number,
-        "To": config.EXOTEL_PHONE_NUMBER,
+        # Exotel connect API expects:
+        # - From: your Exophone/virtual number
+        # - To: customer number
+        "From": config.EXOTEL_PHONE_NUMBER,
+        "To": to_number,
         "CallerId": config.EXOTEL_PHONE_NUMBER,
         "Url": call_handler_url,
         "Record": "true",
