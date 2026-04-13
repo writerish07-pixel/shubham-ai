@@ -63,7 +63,7 @@ def check_connection() -> bool:
         return False
 
 
-def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
+def make_outbound_call(to_number: str, lead_id: str = "", public_url: str = "") -> dict:
     """
     Initiate outbound call from Exophone to customer.
     Exotel will call the customer and bridge to our webhook for AI handling.
@@ -75,7 +75,11 @@ def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
     url = f"https://{config.EXOTEL_SUBDOMAIN}/v1/Accounts/{config.EXOTEL_ACCOUNT_SID}/Calls/connect"
     
     # Exotel passthru URL — our app handles the call logic via webhook
-    call_handler_url = f"{config.PUBLIC_URL}/call/handler"
+    base_url = (public_url or "").rstrip("/")
+    if not base_url:
+        log.error("Cannot make call -- valid public_url missing")
+        return {"success": False, "error": "valid public_url missing"}
+    call_handler_url = f"{base_url}/call/handler"
     
     payload = {
         # Exotel connect API expects:
@@ -88,9 +92,10 @@ def make_outbound_call(to_number: str, lead_id: str = "") -> dict:
         "Record": "true",
         "TimeLimit": 300,          # max 5 min call
         "TimeOut": 30,             # ring timeout
-        "StatusCallback": f"{config.PUBLIC_URL}/call/status",
+        "StatusCallback": f"{base_url}/call/status",
         "CustomField": lead_id,
     }
+    log.info("Exotel outbound URLs | Url=%s | StatusCallback=%s", call_handler_url, payload["StatusCallback"])
     
     try:
         r = _request_with_retry(
