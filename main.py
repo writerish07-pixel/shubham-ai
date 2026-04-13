@@ -25,6 +25,7 @@ from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 from fastapi import WebSocket, WebSocketDisconnect
 import pandas as pd
@@ -134,56 +135,78 @@ _pending_outbound: set[str] = set()
 _executor = ThreadPoolExecutor(max_workers=config.THREAD_POOL_SIZE)
 
 
-# Trusted hosting domains for auto-detection (prevents host header poisoning)
-_TRUSTED_HOST_SUFFIXES = (
-    ".onrender.com",
-    ".railway.app",
-    ".herokuapp.com",
-    ".fly.dev",
-    ".ngrok-free.app",
-    ".ngrok.io",
-)
+def _is_public_base_url(url: str) -> bool:
+    """Return True if URL appears publicly reachable (not localhost/private loopback)."""
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower().strip()
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return False
+    if host.endswith(".local"):
+        return False
+    return True
 
 
-def _get_public_url(request: Request) -> str:
-    """Return the public URL for Exotel callbacks.
+def get_public_url(request: Request) -> str:
+    """Return safe public base URL for Exotel callbacks/playback.
 
-    If PUBLIC_URL is explicitly set in .env (not the localhost default),
-    use that.  Otherwise auto-detect from the X-Forwarded-Host header
-    set by reverse proxies (Render, Railway, etc.).  Only trusts hosts
-    matching known hosting platform domains to prevent header poisoning.
+    Priority:
+    1) X-Forwarded-Host (+ X-Forwarded-Proto)
+    2) Host header
+    3) config.PUBLIC_URL fallback (only if public/non-localhost)
+
+    Raises:
+        ValueError: when no valid public URL can be resolved.
     """
+    # 1) Forwarded host takes highest priority.
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").strip()
+    if forwarded_host:
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme or "https")
+        detected = f"{scheme}://{forwarded_host}"
+        if _is_public_base_url(detected):
+            config.PUBLIC_URL = detected.rstrip("/")
+            print(f"[Config] AUTO-DETECTED PUBLIC_URL: {config.PUBLIC_URL}")
+            return config.PUBLIC_URL
+        raise ValueError(f"Invalid x-forwarded-host for public URL: {forwarded_host}")
+
+    # 2) Fallback to Host header.
+    host = (request.headers.get("host") or "").strip()
+    if host:
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme or "https")
+        detected = f"{scheme}://{host}"
+        if _is_public_base_url(detected):
+            config.PUBLIC_URL = detected.rstrip("/")
+            print(f"[Config] AUTO-DETECTED PUBLIC_URL (Host): {config.PUBLIC_URL}")
+            return config.PUBLIC_URL
+        raise ValueError(f"Invalid host header for public URL: {host}")
+
+    # 3) Last fallback: configured PUBLIC_URL if safe.
     configured = config.PUBLIC_URL
-    if configured and "localhost" not in configured and "127.0.0.1" not in configured:
+    if _is_public_base_url(configured):
         return configured.rstrip("/")
 
-    # Only trust X-Forwarded-Host (set by reverse proxies), not raw Host header
-    forwarded_host = (request.headers.get("x-forwarded-host") or "").strip()
-    if not forwarded_host:
-        return configured
-
-    # Validate against trusted hosting domains
-    host_lower = forwarded_host.lower().split(":")[0]  # strip port if present
-    if not any(host_lower.endswith(suffix) for suffix in _TRUSTED_HOST_SUFFIXES):
-        print(f"[Config] WARNING: Untrusted X-Forwarded-Host '{forwarded_host}' — ignoring")
-        return configured
-
-    scheme = request.headers.get("x-forwarded-proto", "https")
-    detected = f"{scheme}://{forwarded_host}"
-    config.PUBLIC_URL = detected
-    print(f"[Config] AUTO-DETECTED PUBLIC_URL: {detected}")
-    return detected
+    raise ValueError("No valid public URL found (forwarded host, host, or config.PUBLIC_URL)")
 
 
 # ── HEALTH ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
-async def root():
+async def root(request: Request):
+    try:
+        public_url = get_public_url(request)
+    except Exception:
+        public_url = ""
     return JSONResponse({
         "status": "running",
         "agent": "Shubham Motors AI Voice Agent (Optimized)",
         "version": "3.0.0",
-        "dashboard": f"{config.PUBLIC_URL}/dashboard",
+        "dashboard": f"{public_url}/dashboard" if public_url else "",
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
 
@@ -207,7 +230,7 @@ def _xml_safe(text: str) -> str:
             .replace("'", "&apos;"))
 
 
-def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> str:
+def _record_xml(call_sid: str, public_url: str, play_url: str = None, say_text: str = None) -> str:
     content = ""
     if play_url:
         content = f"<Play>{play_url}</Play>"
@@ -220,7 +243,7 @@ def _record_xml(call_sid: str, play_url: str = None, say_text: str = None) -> st
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
 {content}
-<Record action="{config.PUBLIC_URL}/call/gather/{call_sid}"
+<Record action="{public_url}/call/gather/{call_sid}"
         method="POST"
         maxLength="60"
         timeout="10"
@@ -295,7 +318,11 @@ async def incoming_call(request: Request, background_tasks: BackgroundTasks):
     caller   = data.get("From", "").strip()
 
     # Auto-detect public URL from request if not configured
-    public_url = _get_public_url(request)
+    try:
+        public_url = get_public_url(request)
+    except Exception as e:
+        print(f"[Incoming] ERROR resolving public URL: {e}")
+        return Response(content=_hangup_xml(), media_type="application/xml")
 
     print(f"\n[Incoming] Call from {caller} | SID: {call_sid} | URL: {public_url}")
 
@@ -332,7 +359,11 @@ async def outbound_call_handler(request: Request):
     lead_id  = form.get("CustomField", "").strip()
 
     # Auto-detect public URL from request if not configured
-    _get_public_url(request)
+    try:
+        public_url = get_public_url(request)
+    except Exception as e:
+        print(f"[Outbound] ERROR resolving public URL: {e}")
+        return Response(content=_hangup_xml(), media_type="application/xml")
 
     print(f"\n[Outbound] Call to {called} | SID: {call_sid} | Lead: {lead_id}")
 
@@ -350,13 +381,14 @@ async def outbound_call_handler(request: Request):
         if opening_audio:
             opening_path = UPLOAD_DIR / f"opening_{call_sid}.mp3"
             opening_path.write_bytes(opening_audio)
-            opening_url = f"{config.PUBLIC_URL}/call/audio/opening/{call_sid}"
+            opening_url = f"{public_url}/call/audio/opening/{call_sid}"
+            print(f"[Exotel URL] Outbound opening <Play>: {opening_url}")
     except Exception as e:
         print(f"[Outbound] Greeting gen error: {e}")
 
     if opening_url:
         return Response(
-            content=_record_xml(call_sid, play_url=opening_url),
+            content=_record_xml(call_sid, public_url=public_url, play_url=opening_url),
             media_type="application/xml"
         )
     else:
@@ -366,7 +398,7 @@ async def outbound_call_handler(request: Request):
             "Aapki bike enquiry ke baare mein baat karna tha — abhi free hain?"
         )
         return Response(
-            content=_record_xml(call_sid, say_text=greeting),
+            content=_record_xml(call_sid, public_url=public_url, say_text=greeting),
             media_type="application/xml"
         )
 
@@ -376,7 +408,11 @@ async def handle_gather(call_sid: str, request: Request):
     """Gather handler: download recording → STT → intent/LLM → TTS → respond."""
     try:
         # Ensure PUBLIC_URL is resolved (safety net for edge cases)
-        _get_public_url(request)
+        try:
+            public_url = get_public_url(request)
+        except Exception as e:
+            print(f"[Gather] [{call_sid}] ERROR resolving public URL: {e}")
+            return Response(content=_hangup_xml(), media_type="application/xml")
 
         form = await request.form()
 
@@ -417,7 +453,7 @@ async def handle_gather(call_sid: str, request: Request):
             # 🔥 OPTIMIZATION: Shorter retry text
             retry_text = "Ji? Kuch suna nahi — louder bol sakte hain?"
             return Response(
-                content=_record_xml(call_sid, say_text=retry_text),
+                content=_record_xml(call_sid, public_url=public_url, say_text=retry_text),
                 media_type="application/xml",
             )
 
@@ -488,31 +524,36 @@ async def handle_gather(call_sid: str, request: Request):
             wav_bytes = _pcm_to_wav(cached_pcm)
             audio_path = UPLOAD_DIR / f"response_{call_sid}.wav"
             audio_path.write_bytes(wav_bytes)
-            audio_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}"
+            audio_url = f"{public_url}/call/audio/response/{call_sid}"
         else:
             # 🔥 OPTIMIZATION: Async TTS — no thread pool
             ai_audio = await synthesize_speech_async(voice_text, lang)
             if ai_audio:
                 audio_path = UPLOAD_DIR / f"response_{call_sid}.mp3"
                 audio_path.write_bytes(ai_audio)
-                audio_url = f"{config.PUBLIC_URL}/call/audio/response/{call_sid}"
+                audio_url = f"{public_url}/call/audio/response/{call_sid}"
 
         # ── Return response to Exotel ──────────────────────────────────
         if audio_url:
+            print(f"[Exotel URL] Gather response <Play>: {audio_url}")
             return Response(
-                content=_record_xml(call_sid, play_url=audio_url),
+                content=_record_xml(call_sid, public_url=public_url, play_url=audio_url),
                 media_type="application/xml",
             )
         else:
             return Response(
-                content=_record_xml(call_sid, say_text=voice_text),
+                content=_record_xml(call_sid, public_url=public_url, say_text=voice_text),
                 media_type="application/xml",
             )
 
     except Exception as e:
         print(f"[Gather ERROR] {e}")
+        try:
+            safe_public_url = get_public_url(request)
+        except Exception:
+            return Response(content=_hangup_xml(), media_type="application/xml")
         return Response(
-            content=_record_xml(call_sid, say_text="Sorry, ek technical issue ho gaya."),
+            content=_record_xml(call_sid, public_url=safe_public_url, say_text="Sorry, ek technical issue ho gaya."),
             media_type="application/xml",
         )
 
@@ -614,7 +655,10 @@ async def import_leads(file: UploadFile = File(...)):
 @app.post("/api/call/make")
 async def trigger_call(request: Request, background_tasks: BackgroundTasks):
     # Ensure PUBLIC_URL is resolved before triggering outbound call
-    _get_public_url(request)
+    try:
+        public_url = get_public_url(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Valid public URL not available: {e}")
 
     data    = await request.json()
     lead_id = data.get("lead_id", "")
@@ -626,7 +670,7 @@ async def trigger_call(request: Request, background_tasks: BackgroundTasks):
     if not mobile:
         raise HTTPException(status_code=400, detail="Mobile number required")
     _pending_outbound.add(mobile.lstrip("0"))
-    background_tasks.add_task(make_outbound_call, mobile, lead_id)
+    background_tasks.add_task(make_outbound_call, mobile, lead_id, public_url)
     return JSONResponse({"success": True, "message": f"Calling {mobile}..."})
 
 
